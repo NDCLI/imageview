@@ -157,8 +157,15 @@ export default function App() {
       }),
     )
 
+    // Force open in new tab with explicit target
     const viewerUrl = `${window.location.pathname}?viewer=1&index=${currentIndex}`
-    window.open(viewerUrl, PREVIEW_TAB_NAME)
+    const newTab = window.open(viewerUrl, PREVIEW_TAB_NAME)
+    if (newTab) {
+      newTab.focus()
+    } else {
+      // Fallback if popup is blocked
+      window.location.href = viewerUrl
+    }
   }
 
   function goToPreviousImage() {
