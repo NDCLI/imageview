@@ -75,6 +75,7 @@ async function createImageRecord(file, indexSeed) {
 }
 
 export default function App() {
+  // Viewer mode with free panning and zoom at cursor
   const initialRouteState = getViewerRouteState()
   const [viewerImages, setViewerImages] = useState(() =>
     initialRouteState.isViewer ? readViewerImagesFromStorage() : [],
