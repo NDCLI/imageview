@@ -189,10 +189,10 @@ export default function App() {
     const imgWidth = activeImage.width * scale
     const imgHeight = activeImage.height * scale
     
-    // Allow free panning at any scale
-    // Calculate max pan to allow image movement beyond screen edges
-    const maxPanX = imgWidth / 2 + stageWidth / 2
-    const maxPanY = imgHeight / 2 + stageHeight / 2
+    // Allow free panning with larger bounds for zoomed images
+    // This lets users drag fully across the image at all zoom levels
+    const maxPanX = imgWidth + stageWidth
+    const maxPanY = imgHeight + stageHeight
     
     const constrainedPanX = Math.min(Math.max(panX, -maxPanX), maxPanX)
     const constrainedPanY = Math.min(Math.max(panY, -maxPanY), maxPanY)
