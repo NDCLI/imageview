@@ -1,0 +1,4 @@
+- This workspace contains a Vite React app for comparing local images.
+- Keep UI changes focused on image upload, comparison, and modal preview workflows.
+- Prefer minimal dependencies unless a new package is clearly necessary.
+- Preserve responsive behavior on desktop and mobile.
