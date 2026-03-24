@@ -184,7 +184,9 @@ export default function App() {
     
     // Get the active image dimensions from viewer images
     const activeImage = viewerImages[Math.min(Math.max(viewerIndex, 0), viewerImages.length - 1)]
-    if (!activeImage) return tx
+    if (!activeImage || activeImage.width === 0 || activeImage.height === 0) {
+      return { scale, panX: 0, panY: 0 }
+    }
     
     const imgWidth = activeImage.width * scale
     const imgHeight = activeImage.height * scale
