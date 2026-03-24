@@ -151,6 +151,11 @@ img {
 .hero-panel {
   padding: 2rem;
   border-radius: 2rem;
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2rem;
 }
 
 .eyebrow,

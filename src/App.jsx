@@ -1,4 +1,5 @@
 import { startTransition, useEffect, useRef, useState } from 'react'
+import JSZip from 'jszip'
 
 const PREVIEW_TAB_NAME = 'local-image-preview'
 const VIEWER_STATE_KEY = 'local-image-viewer-state'
@@ -87,8 +88,8 @@ export default function App() {
 
   const [images, setImages] = useState([])
   const [isLoading, setIsLoading] = useState(false)
-  const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
+  const zipInputRef = useRef(null)
   const imagesRef = useRef([])
 
   useEffect(() => {
@@ -336,9 +337,43 @@ export default function App() {
   }
 
   async function handleFiles(fileList) {
-    const selectedFiles = Array.from(fileList || []).filter((file) => file.type.startsWith('image/'))
+    // Clear old images
+    imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
+    setImages([])
 
-    if (!selectedFiles.length) {
+    const allFiles = Array.from(fileList || [])
+    const imageFiles = []
+    const zipFiles = allFiles.filter((file) => 
+      file.name.toLowerCase().endsWith('.zip') || file.type === 'application/zip' || file.type === 'application/x-zip-compressed'
+    )
+    
+    // Collect regular image files
+    imageFiles.push(...allFiles.filter((file) => file.type.startsWith('image/')))
+
+    // Extract images from zip files
+    for (const zipFile of zipFiles) {
+      try {
+        const zip = new JSZip()
+        const zipContent = await zip.loadAsync(zipFile)
+        
+        for (const [path, file] of Object.entries(zipContent.files)) {
+          // Skip folders and non-image files
+          if (file.dir || !path.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) continue
+          
+          const blob = await file.async('blob')
+          const imageName = path.split('/').pop()
+          const imageFile = new File([blob], imageName, { type: blob.type || 'image/*' })
+          imageFiles.push(imageFile)
+        }
+      } catch (error) {
+        console.error(`Lỗi khi giải nén ${zipFile.name}:`, error)
+      }
+    }
+
+    // Sort images by name
+    imageFiles.sort((a, b) => a.name.localeCompare(b.name))
+
+    if (!imageFiles.length) {
       return
     }
 
@@ -346,7 +381,7 @@ export default function App() {
 
     try {
       const nextRecords = await Promise.all(
-        selectedFiles.map((file, index) => createImageRecord(file, `${Date.now()}-${index}`)),
+        imageFiles.map((file, index) => createImageRecord(file, `${Date.now()}-${index}`)),
       )
 
       startTransition(() => {
@@ -358,23 +393,23 @@ export default function App() {
   }
 
   function openPicker() {
-    fileInputRef.current?.click()
+    folderInputRef.current?.click()
   }
 
-  function openFolderPicker() {
-    folderInputRef.current?.click()
+  function openZipPicker() {
+    zipInputRef.current?.click()
   }
 
   function clearImages() {
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
 
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
-
     if (folderInputRef.current) {
       folderInputRef.current.value = ''
+    }
+
+    if (zipInputRef.current) {
+      zipInputRef.current.value = ''
     }
   }
 
@@ -397,8 +432,11 @@ export default function App() {
       <main className="page">
         <section className="hero-panel">
           <div className="hero-actions">
-            <button type="button" className="ghost-btn" onClick={openFolderPicker}>
-              Chọn thư mục ảnh
+            <button type="button" className="primary-btn" onClick={openPicker}>
+              Chọn folder ảnh
+            </button>
+            <button type="button" className="primary-btn" onClick={openZipPicker}>
+              Chọn file ZIP
             </button>
             <button type="button" className="ghost-btn" onClick={clearImages} disabled={!images.length}>
               Xóa tất cả
@@ -406,22 +444,20 @@ export default function App() {
           </div>
 
           <input
-            ref={fileInputRef}
-            className="hidden-input"
-            type="file"
-            accept="image/*"
-            multiple
-            onChange={(event) => handleFiles(event.target.files)}
-          />
-
-          <input
             ref={folderInputRef}
             className="hidden-input"
             type="file"
             accept="image/*"
             multiple
-            directory=""
-            webkitdirectory=""
+            webkitdirectory="true"
+            onChange={(event) => handleFiles(event.target.files)}
+          />
+
+          <input
+            ref={zipInputRef}
+            className="hidden-input"
+            type="file"
+            accept=".zip"
             onChange={(event) => handleFiles(event.target.files)}
           />
 
