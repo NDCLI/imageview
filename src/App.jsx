@@ -177,9 +177,6 @@ export default function App() {
     if (!stage) return tx
     
     const { scale, panX, panY } = tx
-    if (scale <= 1) {
-      return { scale, panX: 0, panY: 0 }
-    }
     
     const bounds = stage.getBoundingClientRect()
     const stageWidth = bounds.width
@@ -192,12 +189,13 @@ export default function App() {
     const imgWidth = activeImage.width * scale
     const imgHeight = activeImage.height * scale
     
-    // Constrain pan so image stays within view
-    const maxPanX = Math.max(0, imgWidth - stageWidth)
-    const maxPanY = Math.max(0, imgHeight - stageHeight)
+    // Allow free panning at any scale
+    // Calculate max pan to allow image movement beyond screen edges
+    const maxPanX = imgWidth / 2 + stageWidth / 2
+    const maxPanY = imgHeight / 2 + stageHeight / 2
     
-    const constrainedPanX = Math.min(Math.max(panX, -maxPanX), 0)
-    const constrainedPanY = Math.min(Math.max(panY, -maxPanY), 0)
+    const constrainedPanX = Math.min(Math.max(panX, -maxPanX), maxPanX)
+    const constrainedPanY = Math.min(Math.max(panY, -maxPanY), maxPanY)
     
     return { scale, panX: constrainedPanX, panY: constrainedPanY }
   }
@@ -232,10 +230,19 @@ export default function App() {
       const bounds = stage.getBoundingClientRect()
       const cx = event.clientX - bounds.left
       const cy = event.clientY - bounds.top
-      const newScale = clamp(scale + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP), MIN_ZOOM, MAX_ZOOM)
+      
+      // Calculate zoom center in image coordinates (before zoom)
       const ix = (cx - panX) / scale
       const iy = (cy - panY) / scale
-      const newTx = { scale: newScale, panX: cx - ix * newScale, panY: cy - iy * newScale }
+      
+      // Apply new scale
+      const newScale = clamp(scale + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP), MIN_ZOOM, MAX_ZOOM)
+      
+      // Calculate new pan to keep the same point under cursor
+      const newPanX = cx - ix * newScale
+      const newPanY = cy - iy * newScale
+      
+      const newTx = { scale: newScale, panX: newPanX, panY: newPanY }
       const constrainedTx = constrainViewerPan(newTx, stage)
       updateViewerTx(constrainedTx)
     }
@@ -266,10 +273,6 @@ export default function App() {
   }
 
   function handleViewerMouseDown(event) {
-    if (viewerTxRef.current.scale <= 1) {
-      return
-    }
-
     event.preventDefault()
     viewerDragRef.current = { lastX: event.clientX, lastY: event.clientY }
     document.body.style.cursor = 'grabbing'
@@ -284,7 +287,9 @@ export default function App() {
     const dy = event.clientY - viewerDragRef.current.lastY
     viewerDragRef.current = { lastX: event.clientX, lastY: event.clientY }
     const { scale, panX, panY } = viewerTxRef.current
-    updateViewerTx({ scale, panX: panX + dx, panY: panY + dy })
+    const newTx = { scale, panX: panX + dx, panY: panY + dy }
+    const constrainedTx = constrainViewerPan(newTx, viewerStageRef.current)
+    updateViewerTx(constrainedTx)
   }
 
   function handleViewerMouseUp() {
