@@ -2,7 +2,8 @@ import { startTransition, useEffect, useRef, useState } from 'react'
 import JSZip from 'jszip'
 import { getFolderHandle, setFolderHandle, clearFolderHandle } from './storage'
 
-const PREVIEW_TAB_NAME = 'local-image-preview'
+const PREVIEW_TAB_NAME = 'image-viewer-tab'
+
 const VIEWER_STATE_KEY = 'local-image-viewer-state'
 const MIN_ZOOM = 1
 const MAX_ZOOM = 6
@@ -11,6 +12,7 @@ const ZOOM_STEP = 0.2
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max)
 }
+
 
 function getViewerRouteState() {
   const params = new URLSearchParams(window.location.search)
@@ -74,20 +76,55 @@ export default function App() {
   const viewerDragRef = useRef(null)
   const isViewerMode = initialRouteState.isViewer
 
+  useEffect(() => {
+    if (!isViewerMode) {
+      window.name = 'image-preview-main'
+    } else {
+      window.name = 'image-viewer-tab'
+    }
+  }, [isViewerMode])
+
   const [images, setImages] = useState([])
   const [isLoading, setIsLoading] = useState(false)
+  const [loadDone, setLoadDone] = useState(false)
   const [hasSavedFolder, setHasSavedFolder] = useState(false)
   const [showReloadPrompt, setShowReloadPrompt] = useState(false)
   const imagesRef = useRef([])
+
+  const [visibleCount, setVisibleCount] = useState(50)
+  const observerTarget = useRef(null)
 
   useEffect(() => {
     getFolderHandle().then(handle => {
       if (handle) {
         setHasSavedFolder(true)
-        setShowReloadPrompt(true)
+        if (!isViewerMode) {
+          setShowReloadPrompt(true)
+        }
       }
-    }).catch(() => {})
-  }, [])
+    }).catch(() => { })
+  }, [isViewerMode])
+
+  useEffect(() => {
+    setVisibleCount(50)
+  }, [images])
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          setVisibleCount((prev) => Math.min(prev + 50, images.length))
+        }
+      },
+      { threshold: 0.1, rootMargin: '200px' }
+    )
+
+    if (observerTarget.current) {
+      observer.observe(observerTarget.current)
+    }
+
+    return () => observer.disconnect()
+  }, [images.length])
 
   useEffect(() => {
     imagesRef.current = images
@@ -98,6 +135,38 @@ export default function App() {
       imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     }
   }, [])
+
+  useEffect(() => {
+    if (!isViewerMode || viewerImages.length === 0) return
+
+    // Poll the blob URL to see if the main tab is still alive
+    const testUrl = viewerImages[0].url
+    
+    // We do a quick fetch check every 2 seconds
+    const intervalId = setInterval(() => {
+      fetch(testUrl)
+        .then(res => {
+          if (!res.ok) {
+            setShowReloadPrompt(true)
+            clearInterval(intervalId)
+          } else {
+            setShowReloadPrompt(false)
+          }
+        })
+        .catch(() => {
+          setShowReloadPrompt(true)
+          clearInterval(intervalId)
+        })
+    }, 2000)
+
+    // Run once immediately on mount
+    fetch(testUrl).then(res => {
+      if (!res.ok) setShowReloadPrompt(true)
+      else setShowReloadPrompt(false)
+    }).catch(() => setShowReloadPrompt(true))
+
+    return () => clearInterval(intervalId)
+  }, [isViewerMode, viewerImages])
 
   useEffect(() => {
     if (!isViewerMode) {
@@ -119,7 +188,8 @@ export default function App() {
       return
     }
 
-    const maxIndex = Math.max(0, viewerImages.length - 1)
+    const displayImages = images.length > 0 ? images : viewerImages
+    const maxIndex = Math.max(0, displayImages.length - 1)
     const safeIndex = Math.min(Math.max(viewerIndex, 0), maxIndex)
 
     if (safeIndex !== viewerIndex) {
@@ -128,12 +198,14 @@ export default function App() {
     }
 
     writeViewerIndexToUrl(safeIndex)
-    if (viewerImages[safeIndex]) {
+    if (displayImages[safeIndex]) {
       if (document.activeElement !== searchInputRef.current) {
-        setSearchQuery(viewerImages[safeIndex].name)
+        setSearchQuery(displayImages[safeIndex].name)
       }
     }
-  }, [isViewerMode, viewerImages, viewerIndex])
+  }, [isViewerMode, viewerImages, viewerIndex, images])
+
+
 
   function openImageInNewTab(image) {
     const snapshot = imagesRef.current.map((currentImage) => ({
@@ -158,14 +230,15 @@ export default function App() {
       }),
     )
 
-    // Force open in new tab with explicit target
+    // Force open in new tab with explicit target (reusing the same viewer tab)
     const viewerUrl = `${window.location.pathname}?viewer=1&index=${currentIndex}`
     const newTab = window.open(viewerUrl, PREVIEW_TAB_NAME)
     if (newTab) {
       newTab.focus()
     } else {
-      // Fallback if popup is blocked
-      window.location.href = viewerUrl
+      // Fallback if popup is blocked - we should NOT replace the current tab, 
+      // just inform the user instead of destroying their preview page.
+      alert('Vui lòng cho phép mở popup (Allow Popups) để xem tab ảnh!')
     }
   }
 
@@ -174,7 +247,8 @@ export default function App() {
   }
 
   function goToNextImage() {
-    setViewerIndex((current) => Math.min(viewerImages.length - 1, current + 1))
+    const displayImages = images.length > 0 ? images : viewerImages
+    setViewerIndex((current) => Math.min(displayImages.length - 1, current + 1))
   }
 
   function updateViewerTx(next) {
@@ -184,30 +258,30 @@ export default function App() {
 
   function constrainViewerPan(tx, stage) {
     if (!stage) return tx
-    
+
     const { scale, panX, panY } = tx
-    
+
     const bounds = stage.getBoundingClientRect()
     const stageWidth = bounds.width
     const stageHeight = bounds.height
-    
-    // Get the active image dimensions from viewer images
-    const activeImage = viewerImages[Math.min(Math.max(viewerIndex, 0), viewerImages.length - 1)]
+
+    const displayImages = images.length > 0 ? images : viewerImages
+    const activeImage = displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)]
     if (!activeImage || activeImage.width === 0 || activeImage.height === 0) {
       return { scale, panX: 0, panY: 0 }
     }
-    
+
     const imgWidth = activeImage.width * scale
     const imgHeight = activeImage.height * scale
-    
+
     // Allow free panning with larger bounds for zoomed images
     // This lets users drag fully across the image at all zoom levels
     const maxPanX = imgWidth + stageWidth
     const maxPanY = imgHeight + stageHeight
-    
+
     const constrainedPanX = Math.min(Math.max(panX, -maxPanX), maxPanX)
     const constrainedPanY = Math.min(Math.max(panY, -maxPanY), maxPanY)
-    
+
     return { scale, panX: constrainedPanX, panY: constrainedPanY }
   }
 
@@ -241,18 +315,18 @@ export default function App() {
       const bounds = stage.getBoundingClientRect()
       const cx = event.clientX - bounds.left
       const cy = event.clientY - bounds.top
-      
+
       // Calculate zoom center in image coordinates (before zoom)
       const ix = (cx - panX) / scale
       const iy = (cy - panY) / scale
-      
+
       // Apply new scale
       const newScale = clamp(scale + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP), MIN_ZOOM, MAX_ZOOM)
-      
+
       // Calculate new pan to keep the same point under cursor
       const newPanX = cx - ix * newScale
       const newPanY = cy - iy * newScale
-      
+
       const newTx = { scale: newScale, panX: newPanX, panY: newPanY }
       const constrainedTx = constrainViewerPan(newTx, stage)
       updateViewerTx(constrainedTx)
@@ -325,18 +399,49 @@ export default function App() {
   }
 
   if (isViewerMode) {
-    const hasImages = viewerImages.length > 0
-    const activeImage = hasImages ? viewerImages[Math.min(Math.max(viewerIndex, 0), viewerImages.length - 1)] : null
+    const displayImages = images.length > 0 ? images : viewerImages
+    const hasImages = displayImages.length > 0
+    const activeImage = hasImages ? displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)] : null
 
     return (
       <main className="viewer-shell">
+        {showReloadPrompt && (
+          <div className="reload-overlay" style={{
+            position: 'fixed',
+            top: '20px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 1000,
+            width: 'min(600px, 90%)',
+            padding: '16px',
+            background: 'rgba(20, 30, 45, 0.95)',
+            borderRadius: '12px',
+            border: '1px solid rgba(255,255,255,0.2)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '16px',
+            boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
+            backdropFilter: 'blur(10px)'
+          }}>
+            <div style={{ textAlign: 'left' }}>
+              <strong style={{ display: 'block', color: 'white' }}>Cần nạp lại dữ liệu ảnh!</strong>
+              <span style={{ fontSize: '0.85em', color: 'rgba(255,255,255,0.7)' }}>Tab chính đã đóng hoặc dữ liệu cũ hết hạn. Bấm để khôi phục.</span>
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button type="button" className="primary-btn" onClick={reloadFolder} style={{ padding: '8px 16px', fontSize: '0.9em' }}>
+                Tải lại
+              </button>
+            </div>
+          </div>
+        )}
         <section className="viewer-panel">
           {hasImages && activeImage ? (
             <>
               <div
                 ref={viewerStageRef}
                 className="viewer-stage"
-                style={{ cursor: viewerTx.scale > 1 ? 'grab' : 'zoom-in' }}
+                style={{ cursor: viewerTx.scale > 1 ? 'grab' : 'default' }}
                 onMouseDown={handleViewerMouseDown}
                 onMouseMove={handleViewerMouseMove}
                 onMouseUp={handleViewerMouseUp}
@@ -351,6 +456,10 @@ export default function App() {
                     transform: `translate(${viewerTx.panX}px, ${viewerTx.panY}px) scale(${viewerTx.scale})`,
                     transformOrigin: '0 0',
                   }}
+                  onError={() => {
+                    // Mất file (Blob URL hỏng do tab chính bị đóng)
+                    setShowReloadPrompt(true)
+                  }}
                 />
               </div>
               <div className="viewer-meta" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
@@ -362,7 +471,7 @@ export default function App() {
                     const query = e.target.value;
                     setSearchQuery(query);
                     if (query) {
-                      const foundIndex = viewerImages.findIndex(img => img.name.toLowerCase().includes(query.toLowerCase()));
+                      const foundIndex = displayImages.findIndex(img => img.name.toLowerCase().includes(query.toLowerCase()));
                       if (foundIndex !== -1 && foundIndex !== viewerIndex) {
                         setViewerIndex(foundIndex);
                       }
@@ -388,7 +497,7 @@ export default function App() {
                   placeholder="Dán hoặc nhập tên ảnh để tìm..."
                   title="Tìm kiếm tên ảnh"
                 />
-                <span>• {viewerIndex + 1}/{viewerImages.length} • {activeImage.width} x {activeImage.height} • Zoom {Math.round(viewerTx.scale * 100)}% • ← → để chuyển</span>
+                <span>• {viewerIndex + 1}/{displayImages.length} • {activeImage.width} x {activeImage.height} • Zoom {Math.round(viewerTx.scale * 100)}% • ← → để chuyển</span>
               </div>
             </>
           ) : (
@@ -412,7 +521,7 @@ export default function App() {
         const req = await handle.requestPermission({ mode: 'read' })
         if (req !== 'granted') return
       }
-      
+
       if (handle.kind === 'directory') {
         await readDirectoryHandle(handle)
       } else if (handle.kind === 'file') {
@@ -452,6 +561,7 @@ export default function App() {
       console.error(err)
     } finally {
       setIsLoading(false)
+      setLoadDone(true)
     }
   }
 
@@ -474,7 +584,7 @@ export default function App() {
       const zipFile = await fileHandle.getFile()
       const zip = new JSZip()
       const zipContent = await zip.loadAsync(zipFile)
-      
+
       const imageData = []
       for (const [path, zipEntry] of Object.entries(zipContent.files)) {
         if (zipEntry.dir || !path.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) continue
@@ -484,10 +594,10 @@ export default function App() {
         const imageFile = new File([blob], path, { type: blob.type || 'image/*' })
         imageData.push({ file: imageFile, name: path })
       }
-      
+
       imageData.sort((a, b) => a.name.localeCompare(b.name))
       if (!imageData.length) return
-      
+
       const nextRecords = imageData.map((data, index) =>
         createImageRecord(data.file, `${Date.now()}-${index}`, data.name)
       )
@@ -498,6 +608,7 @@ export default function App() {
       console.error('Lỗi khi tải lại zip:', err)
     } finally {
       setIsLoading(false)
+      setLoadDone(true)
     }
   }
 
@@ -552,7 +663,7 @@ export default function App() {
         <section className="hero-panel">
           <div className="hero-actions">
             <button type="button" className="primary-btn" onClick={openPicker}>
-              Chọn folder ảnh
+              Chọn Folder
             </button>
             <button type="button" className="primary-btn" onClick={openZipPicker}>
               Chọn file ZIP
@@ -594,9 +705,14 @@ export default function App() {
               <span>{images.length}</span>
               <p>Tổng ảnh đã nạp</p>
             </article>
-            <article>
-              <span>{isLoading ? '...' : 'OK'}</span>
-              <p>{isLoading ? 'Đang đọc ảnh' : 'ready'}</p>
+            <article style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '80px' }}>
+              {isLoading ? (
+                <span className="loading-spinner" />
+              ) : loadDone ? (
+                <>
+                  <span style={{ color: '#4ade80', fontSize: 'clamp(1.8rem, 4vw, 2.8rem)', fontWeight: 700 }}>OK</span>
+                </>
+              ) : null}
             </article>
           </div>
         </section>
@@ -608,23 +724,20 @@ export default function App() {
 
             </div>
             <p className="section-note">
-              {isLoading
-                ? 'Đang đọc thông tin ảnh...'
-                : 'Danh sách chỉ hiển thị preview nhỏ. Bấm ảnh để mở trong cùng 1 tab preview, hoặc xóa từng ảnh.'}
+              {isLoading && 'Đang đọc thông tin ảnh...'}
             </p>
           </div>
 
           {!images.length ? (
             <div className="empty-gallery">
               <h3>Chưa có ảnh nào được nạp</h3>
-              <p>Chọn nhiều file ảnh từ máy tính để tạo list preview.</p>
             </div>
           ) : (
             <div className="preview-list" role="list">
-              {images.map((image) => (
+              {images.slice(0, visibleCount).map((image) => (
                 <article key={image.id} className="preview-item" role="listitem">
                   <button type="button" className="preview-button" onClick={() => openImageInNewTab(image)}>
-                    <img src={image.url} alt={image.name} onLoad={(e) => handleThumbnailLoad(image.id, e)} />
+                    <img src={image.url} alt={image.name} loading="lazy" onLoad={(e) => handleThumbnailLoad(image.id, e)} />
                   </button>
 
                   <div className="preview-meta">
@@ -633,12 +746,11 @@ export default function App() {
                       {image.width ? `${image.width} x ${image.height}` : '...'}
                     </span>
                   </div>
-
-                  <button type="button" className="danger-btn preview-remove" onClick={() => removeImage(image.id)}>
-                    Xóa
-                  </button>
                 </article>
               ))}
+              {visibleCount < images.length && (
+                <div ref={observerTarget} style={{ height: '20px', width: '100%', gridColumn: '1 / -1' }} />
+              )}
             </div>
           )}
         </section>
