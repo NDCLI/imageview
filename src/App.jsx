@@ -63,56 +63,134 @@ function fileToBase64(file) {
   })
 }
 
-function saveImagesToStorage(images) {
+const GALLERY_DB_NAME = 'local-image-gallery-db'
+const GALLERY_STORE_NAME = 'images'
+
+function openGalleryDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(GALLERY_DB_NAME, 1)
+    request.onerror = () => reject(request.error)
+    request.onsuccess = () => resolve(request.result)
+    
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result
+      if (!db.objectStoreNames.contains(GALLERY_STORE_NAME)) {
+        db.createObjectStore(GALLERY_STORE_NAME, { keyPath: 'id' })
+      }
+    }
+  })
+}
+
+async function saveImagesToStorage(images) {
   try {
-    const serializableImages = images.map((image) => ({
-      id: image.id,
-      base64: image.base64,
-      name: image.name,
-      size: image.size,
-      type: image.type,
-      width: image.width,
-      height: image.height,
-    }))
-    localStorage.setItem(GALLERY_STATE_KEY, JSON.stringify(serializableImages))
+    const db = await openGalleryDB()
+    const transaction = db.transaction([GALLERY_STORE_NAME], 'readwrite')
+    const store = transaction.objectStore(GALLERY_STORE_NAME)
+    
+    // Clear existing images
+    await new Promise((resolve, reject) => {
+      const clearRequest = store.clear()
+      clearRequest.onsuccess = () => resolve()
+      clearRequest.onerror = () => reject(clearRequest.error)
+    })
+    
+    // Save new images
+    for (const image of images) {
+      const imageData = {
+        id: image.id,
+        base64: image.base64,
+        name: image.name,
+        size: image.size,
+        type: image.type,
+        width: image.width,
+        height: image.height,
+      }
+      await new Promise((resolve, reject) => {
+        const putRequest = store.put(imageData)
+        putRequest.onsuccess = () => resolve()
+        putRequest.onerror = () => reject(putRequest.error)
+      })
+    }
+    
+    console.log('Images saved to IndexedDB successfully')
   } catch (error) {
-    console.error('Lỗi khi lưu ảnh vào storage:', error)
+    console.error('Error saving images to IndexedDB:', error)
   }
 }
 
-function loadImagesFromStorage() {
+async function loadImagesFromStorage() {
   try {
-    const raw = localStorage.getItem(GALLERY_STATE_KEY)
-    if (!raw) return []
-
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-
-    return parsed.map((item) => {
-      const blob = dataURLToBlob(item.base64)
-      const url = URL.createObjectURL(blob)
-      return {
-        ...item,
-        file: blob,
-        url,
+    const db = await openGalleryDB()
+    const transaction = db.transaction([GALLERY_STORE_NAME], 'readonly')
+    const store = transaction.objectStore(GALLERY_STORE_NAME)
+    
+    return new Promise((resolve, reject) => {
+      const getAllRequest = store.getAll()
+      getAllRequest.onsuccess = () => {
+        const items = getAllRequest.result
+        console.log('Found', items.length, 'images in IndexedDB')
+        
+        const loadedImages = []
+        for (const item of items) {
+          try {
+            const blob = dataURLToBlob(item.base64)
+            const url = URL.createObjectURL(blob)
+            loadedImages.push({
+              ...item,
+              file: blob,
+              url,
+            })
+          } catch (error) {
+            console.error('Error loading image from IndexedDB:', item.name, error)
+          }
+        }
+        console.log('Successfully loaded', loadedImages.length, 'images from IndexedDB')
+        resolve(loadedImages)
       }
+      getAllRequest.onerror = () => reject(getAllRequest.error)
     })
   } catch (error) {
-    console.error('Lỗi khi tải ảnh từ storage:', error)
+    console.error('Error loading images from IndexedDB:', error)
     return []
   }
 }
 
-function dataURLToBlob(dataURL) {
-  const arr = dataURL.split(',')
-  const mime = arr[0].match(/:(.*?);/)[1]
-  const bstr = atob(arr[1])
-  let n = bstr.length
-  const u8arr = new Uint8Array(n)
-  while (n--) {
-    u8arr[n] = bstr.charCodeAt(n)
+async function clearImagesFromStorage() {
+  try {
+    const db = await openGalleryDB()
+    const transaction = db.transaction([GALLERY_STORE_NAME], 'readwrite')
+    const store = transaction.objectStore(GALLERY_STORE_NAME)
+    
+    await new Promise((resolve, reject) => {
+      const clearRequest = store.clear()
+      clearRequest.onsuccess = () => resolve()
+      clearRequest.onerror = () => reject(clearRequest.error)
+    })
+    
+    console.log('Images cleared from IndexedDB')
+  } catch (error) {
+    console.error('Error clearing images from IndexedDB:', error)
   }
-  return new Blob([u8arr], { type: mime })
+}
+
+function dataURLToBlob(dataURL) {
+  try {
+    const arr = dataURL.split(',')
+    if (arr.length !== 2) throw new Error('Invalid data URL')
+    const mimeMatch = arr[0].match(/:(.*?);/)
+    if (!mimeMatch) throw new Error('Invalid MIME type')
+    const mime = mimeMatch[1]
+    const bstr = atob(arr[1])
+    let n = bstr.length
+    const u8arr = new Uint8Array(n)
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n)
+    }
+    return new Blob([u8arr], { type: mime })
+  } catch (error) {
+    console.error('Error converting data URL to blob:', error)
+    throw error
+  }
 }
 
 async function createImageRecord(file, indexSeed) {
@@ -151,9 +229,7 @@ export default function App() {
   const viewerDragRef = useRef(null)
   const isViewerMode = initialRouteState.isViewer
 
-  const [images, setImages] = useState(() =>
-    initialRouteState.isViewer ? [] : loadImagesFromStorage(),
-  )
+  const [images, setImages] = useState([])
   const [isLoading, setIsLoading] = useState(false)
   const folderInputRef = useRef(null)
   const zipInputRef = useRef(null)
@@ -162,6 +238,16 @@ export default function App() {
   useEffect(() => {
     imagesRef.current = images
   }, [images])
+
+  useEffect(() => {
+    if (isViewerMode) return
+    
+    loadImagesFromStorage().then((loadedImages) => {
+      setImages(loadedImages)
+    }).catch((error) => {
+      console.error('Failed to load images from storage:', error)
+    })
+  }, [isViewerMode])
 
   useEffect(() => {
     return () => {
@@ -488,7 +574,7 @@ export default function App() {
   function clearImages() {
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
-    localStorage.removeItem(GALLERY_STATE_KEY)
+    clearImagesFromStorage()
 
     if (folderInputRef.current) {
       folderInputRef.current.value = ''
