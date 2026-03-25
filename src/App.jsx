@@ -54,17 +54,18 @@ function readImageDimensions(url) {
   })
 }
 
-async function createImageRecord(file, indexSeed) {
+async function createImageRecord(file, indexSeed, overrideName = null) {
   const url = URL.createObjectURL(file)
 
   try {
     const dimensions = await readImageDimensions(url)
+    const displayName = overrideName || file.name
 
     return {
-      id: `${file.name}-${file.lastModified}-${indexSeed}`,
+      id: `${displayName}-${file.lastModified}-${indexSeed}`,
       file,
       url,
-      name: file.name,
+      name: displayName,
       size: file.size,
       type: file.type || 'image/*',
       ...dimensions,
@@ -386,23 +387,23 @@ export default function App() {
     setIsLoading(true)
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
-    const imageFiles = []
+    const imageData = []
     try {
-      async function traverse(handle) {
+      async function traverse(handle, currentPath = '') {
         for await (const entry of handle.values()) {
           if (entry.kind === 'file' && entry.name.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
             const file = await entry.getFile()
-            imageFiles.push(file)
+            imageData.push({ file, name: currentPath + entry.name })
           } else if (entry.kind === 'directory') {
-            await traverse(entry)
+            await traverse(entry, currentPath + entry.name + '/')
           }
         }
       }
-      await traverse(dirHandle)
-      imageFiles.sort((a, b) => a.name.localeCompare(b.name))
-      if (!imageFiles.length) return
+      await traverse(dirHandle, dirHandle.name + '/')
+      imageData.sort((a, b) => a.name.localeCompare(b.name))
+      if (!imageData.length) return
       const nextRecords = await Promise.all(
-        imageFiles.map((file, index) => createImageRecord(file, `${Date.now()}-${index}`))
+        imageData.map((data, index) => createImageRecord(data.file, `${Date.now()}-${index}`, data.name))
       )
       startTransition(() => {
         setImages(nextRecords)
@@ -434,20 +435,21 @@ export default function App() {
       const zip = new JSZip()
       const zipContent = await zip.loadAsync(zipFile)
       
-      const imageFiles = []
+      const imageData = []
       for (const [path, zipEntry] of Object.entries(zipContent.files)) {
         if (zipEntry.dir || !path.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) continue
         const blob = await zipEntry.async('blob')
-        const imageName = path.split('/').pop()
-        const imageFile = new File([blob], imageName, { type: blob.type || 'image/*' })
-        imageFiles.push(imageFile)
+        // Lấy tên zip làm thư mục gốc (nếu zip file không gom chung vào 1 folder to) hoặc lấy luôn path trong zip
+        // `path` của ZIP mặc định đã chứa full folder hierarchy như "folder/image.png", nên dùng trực tiếp `path` là tốt nhất
+        const imageFile = new File([blob], path, { type: blob.type || 'image/*' })
+        imageData.push({ file: imageFile, name: path })
       }
       
-      imageFiles.sort((a, b) => a.name.localeCompare(b.name))
-      if (!imageFiles.length) return
+      imageData.sort((a, b) => a.name.localeCompare(b.name))
+      if (!imageData.length) return
       
       const nextRecords = await Promise.all(
-        imageFiles.map((file, index) => createImageRecord(file, `${Date.now()}-${index}`))
+        imageData.map((data, index) => createImageRecord(data.file, `${Date.now()}-${index}`, data.name))
       )
       startTransition(() => {
         setImages(nextRecords)
