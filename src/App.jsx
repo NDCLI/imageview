@@ -1,9 +1,9 @@
 import { startTransition, useEffect, useRef, useState } from 'react'
 import JSZip from 'jszip'
+import { getFolderHandle, setFolderHandle, clearFolderHandle } from './storage'
 
 const PREVIEW_TAB_NAME = 'local-image-preview'
 const VIEWER_STATE_KEY = 'local-image-viewer-state'
-const GALLERY_STATE_KEY = 'local-image-gallery-state'
 const MIN_ZOOM = 1
 const MAX_ZOOM = 6
 const ZOOM_STEP = 0.2
@@ -54,192 +54,8 @@ function readImageDimensions(url) {
   })
 }
 
-function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = reject
-    reader.readAsDataURL(file)
-  })
-}
-
-const GALLERY_DB_NAME = 'local-image-gallery-db'
-const GALLERY_STORE_NAME = 'images'
-
-function openGalleryDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(GALLERY_DB_NAME, 1)
-    request.onerror = () => reject(request.error)
-    request.onsuccess = () => resolve(request.result)
-    
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result
-      if (!db.objectStoreNames.contains(GALLERY_STORE_NAME)) {
-        db.createObjectStore(GALLERY_STORE_NAME, { keyPath: 'id' })
-      }
-    }
-  })
-}
-
-
-
-function dataURLToBlob(dataURL) {
-  try {
-    const arr = dataURL.split(',')
-    if (arr.length !== 2) throw new Error('Invalid data URL')
-    const mimeMatch = arr[0].match(/:(.*?);/)
-    if (!mimeMatch) throw new Error('Invalid MIME type')
-    const mime = mimeMatch[1]
-    const bstr = atob(arr[1])
-    let n = bstr.length
-    const u8arr = new Uint8Array(n)
-    while (n--) {
-      u8arr[n] = bstr.charCodeAt(n)
-    }
-    return new Blob([u8arr], { type: mime })
-  } catch (error) {
-    console.error('Error converting data URL to blob:', error)
-    throw error
-  }
-}
-
-function saveImagesToLocalStorage(images) {
-  try {
-    const data = images.map((image) => ({
-      id: image.id,
-      base64: image.base64,
-      name: image.name,
-      size: image.size,
-      type: image.type,
-      width: image.width,
-      height: image.height,
-    }))
-    localStorage.setItem(GALLERY_STATE_KEY, JSON.stringify(data))
-    console.log('Images saved to localStorage')
-  } catch (error) {
-    console.error('Error saving images to localStorage:', error)
-  }
-}
-
-function loadImagesFromLocalStorage() {
-  try {
-    const raw = localStorage.getItem(GALLERY_STATE_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-
-    const loaded = []
-    for (const item of parsed) {
-      try {
-        const blob = dataURLToBlob(item.base64)
-        const url = URL.createObjectURL(blob)
-        loaded.push({ ...item, file: blob, url })
-      } catch (error) {
-        console.error('Failed to restore one image from localStorage:', item.name, error)
-      }
-    }
-    console.log('Loaded', loaded.length, 'images from localStorage')
-    return loaded
-  } catch (error) {
-    console.error('Error loading images from localStorage:', error)
-    return []
-  }
-}
-
-async function saveImagesToStorage(images) {
-  try {
-    const db = await openGalleryDB()
-    const transaction = db.transaction([GALLERY_STORE_NAME], 'readwrite')
-    const store = transaction.objectStore(GALLERY_STORE_NAME)
-    
-    await new Promise((resolve, reject) => {
-      const clearRequest = store.clear()
-      clearRequest.onsuccess = () => resolve()
-      clearRequest.onerror = () => reject(clearRequest.error)
-    })
-    
-    for (const image of images) {
-      const imageData = {
-        id: image.id,
-        base64: image.base64,
-        name: image.name,
-        size: image.size,
-        type: image.type,
-        width: image.width,
-        height: image.height,
-      }
-      await new Promise((resolve, reject) => {
-        const putRequest = store.put(imageData)
-        putRequest.onsuccess = () => resolve()
-        putRequest.onerror = () => reject(putRequest.error)
-      })
-    }
-
-    console.log('Images saved to IndexedDB successfully')
-  } catch (error) {
-    console.error('Error saving images to IndexedDB:', error)
-    console.log('Falling back to localStorage')
-    saveImagesToLocalStorage(images)
-  }
-}
-
-async function clearImagesFromStorage() {
-  try {
-    const db = await openGalleryDB()
-    const transaction = db.transaction([GALLERY_STORE_NAME], 'readwrite')
-    const store = transaction.objectStore(GALLERY_STORE_NAME)
-    await new Promise((resolve, reject) => {
-      const clearRequest = store.clear()
-      clearRequest.onsuccess = () => resolve()
-      clearRequest.onerror = () => reject(clearRequest.error)
-    })
-    console.log('Images cleared from IndexedDB')
-  } catch (error) {
-    console.error('Error clearing images from IndexedDB:', error)
-  } finally {
-    localStorage.removeItem(GALLERY_STATE_KEY)
-  }
-}
-
-async function loadImagesFromStorage() {
-  try {
-    const db = await openGalleryDB()
-    const transaction = db.transaction([GALLERY_STORE_NAME], 'readonly')
-    const store = transaction.objectStore(GALLERY_STORE_NAME)
-    
-    const indexedItems = await new Promise((resolve, reject) => {
-      const request = store.getAll()
-      request.onsuccess = () => resolve(request.result)
-      request.onerror = () => reject(request.error)
-    })
-
-    if (Array.isArray(indexedItems) && indexedItems.length > 0) {
-      const loadedImages = []
-      for (const item of indexedItems) {
-        try {
-          const blob = dataURLToBlob(item.base64)
-          const url = URL.createObjectURL(blob)
-          loadedImages.push({ ...item, file: blob, url })
-        } catch (error) {
-          console.error('Error loading image from IndexedDB:', item.name, error)
-        }
-      }
-      console.log('Loaded', loadedImages.length, 'images from IndexedDB')
-      return loadedImages
-    }
-
-    // If IndexedDB is empty, try localStorage fallback
-    return loadImagesFromLocalStorage()
-  } catch (error) {
-    console.error('Error loading images from IndexedDB:', error)
-    console.log('Falling back to localStorage for image load')
-    return loadImagesFromLocalStorage()
-  }
-}
-
 async function createImageRecord(file, indexSeed) {
   const url = URL.createObjectURL(file)
-  const base64 = await fileToBase64(file)
 
   try {
     const dimensions = await readImageDimensions(url)
@@ -248,7 +64,6 @@ async function createImageRecord(file, indexSeed) {
       id: `${file.name}-${file.lastModified}-${indexSeed}`,
       file,
       url,
-      base64,
       name: file.name,
       size: file.size,
       type: file.type || 'image/*',
@@ -275,32 +90,22 @@ export default function App() {
 
   const [images, setImages] = useState([])
   const [isLoading, setIsLoading] = useState(false)
-  const folderInputRef = useRef(null)
-  const zipInputRef = useRef(null)
+  const [hasSavedFolder, setHasSavedFolder] = useState(false)
+  const [showReloadPrompt, setShowReloadPrompt] = useState(false)
   const imagesRef = useRef([])
+
+  useEffect(() => {
+    getFolderHandle().then(handle => {
+      if (handle) {
+        setHasSavedFolder(true)
+        setShowReloadPrompt(true)
+      }
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => {
     imagesRef.current = images
   }, [images])
-
-  useEffect(() => {
-    if (isViewerMode) return
-
-    loadImagesFromStorage()
-      .then((loadedImages) => {
-        setImages(loadedImages)
-      })
-      .catch((error) => {
-        console.error('Failed to load images from storage:', error)
-      })
-  }, [isViewerMode])
-
-  useEffect(() => {
-    if (isViewerMode) return
-    if (!images.length) return
-
-    saveImagesToStorage(images)
-  }, [images, isViewerMode])
 
   useEffect(() => {
     return () => {
@@ -556,86 +361,123 @@ export default function App() {
     )
   }
 
-  async function handleFiles(fileList) {
-    // Clear old images
+  async function reloadFolder() {
+    setShowReloadPrompt(false)
+    try {
+      const handle = await getFolderHandle()
+      if (!handle) return
+      const perm = await handle.queryPermission({ mode: 'read' })
+      if (perm !== 'granted') {
+        const req = await handle.requestPermission({ mode: 'read' })
+        if (req !== 'granted') return
+      }
+      
+      if (handle.kind === 'directory') {
+        await readDirectoryHandle(handle)
+      } else if (handle.kind === 'file') {
+        await readZipHandle(handle)
+      }
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  async function readDirectoryHandle(dirHandle) {
+    setIsLoading(true)
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
-
-    const allFiles = Array.from(fileList || [])
     const imageFiles = []
-    const zipFiles = allFiles.filter((file) => 
-      file.name.toLowerCase().endsWith('.zip') || file.type === 'application/zip' || file.type === 'application/x-zip-compressed'
-    )
-    
-    // Collect regular image files
-    imageFiles.push(...allFiles.filter((file) => file.type.startsWith('image/')))
-
-    // Extract images from zip files
-    for (const zipFile of zipFiles) {
-      try {
-        const zip = new JSZip()
-        const zipContent = await zip.loadAsync(zipFile)
-        
-        for (const [path, file] of Object.entries(zipContent.files)) {
-          // Skip folders and non-image files
-          if (file.dir || !path.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) continue
-          
-          const blob = await file.async('blob')
-          const imageName = path.split('/').pop()
-          const imageFile = new File([blob], imageName, { type: blob.type || 'image/*' })
-          imageFiles.push(imageFile)
-        }
-      } catch (error) {
-        console.error(`Lỗi khi giải nén ${zipFile.name}:`, error)
-      }
-    }
-
-    // Sort images by name
-    imageFiles.sort((a, b) => a.name.localeCompare(b.name))
-
-    if (!imageFiles.length) {
-      return
-    }
-
-    setIsLoading(true)
-
     try {
+      async function traverse(handle) {
+        for await (const entry of handle.values()) {
+          if (entry.kind === 'file' && entry.name.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+            const file = await entry.getFile()
+            imageFiles.push(file)
+          } else if (entry.kind === 'directory') {
+            await traverse(entry)
+          }
+        }
+      }
+      await traverse(dirHandle)
+      imageFiles.sort((a, b) => a.name.localeCompare(b.name))
+      if (!imageFiles.length) return
       const nextRecords = await Promise.all(
-        imageFiles.map((file, index) => createImageRecord(file, `${Date.now()}-${index}`)),
+        imageFiles.map((file, index) => createImageRecord(file, `${Date.now()}-${index}`))
       )
-
       startTransition(() => {
-        setImages((current) => {
-          const newImages = [...current, ...nextRecords]
-          saveImagesToStorage(newImages)
-          return newImages
-        })
+        setImages(nextRecords)
       })
+    } catch (err) {
+      console.error(err)
     } finally {
       setIsLoading(false)
     }
   }
 
-  function openPicker() {
-    folderInputRef.current?.click()
+  async function openPicker() {
+    try {
+      const handle = await window.showDirectoryPicker({ id: 'image-folder', mode: 'read' })
+      await setFolderHandle(handle)
+      setHasSavedFolder(true)
+      await readDirectoryHandle(handle)
+    } catch (err) {
+      if (err.name !== 'AbortError') console.error(err)
+    }
   }
 
-  function openZipPicker() {
-    zipInputRef.current?.click()
-  }
-
-  function clearImages() {
+  async function readZipHandle(fileHandle) {
+    setIsLoading(true)
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
-    clearImagesFromStorage()
-
-    if (folderInputRef.current) {
-      folderInputRef.current.value = ''
+    try {
+      const zipFile = await fileHandle.getFile()
+      const zip = new JSZip()
+      const zipContent = await zip.loadAsync(zipFile)
+      
+      const imageFiles = []
+      for (const [path, zipEntry] of Object.entries(zipContent.files)) {
+        if (zipEntry.dir || !path.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) continue
+        const blob = await zipEntry.async('blob')
+        const imageName = path.split('/').pop()
+        const imageFile = new File([blob], imageName, { type: blob.type || 'image/*' })
+        imageFiles.push(imageFile)
+      }
+      
+      imageFiles.sort((a, b) => a.name.localeCompare(b.name))
+      if (!imageFiles.length) return
+      
+      const nextRecords = await Promise.all(
+        imageFiles.map((file, index) => createImageRecord(file, `${Date.now()}-${index}`))
+      )
+      startTransition(() => {
+        setImages(nextRecords)
+      })
+    } catch (err) {
+      console.error('Lỗi khi tải lại zip:', err)
+    } finally {
+      setIsLoading(false)
     }
+  }
 
-    if (zipInputRef.current) {
-      zipInputRef.current.value = ''
+  async function openZipPicker() {
+    try {
+      const [fileHandle] = await window.showOpenFilePicker({
+        id: 'zip-file',
+        types: [{ description: 'ZIP Files', accept: { 'application/zip': ['.zip'] } }]
+      })
+      await setFolderHandle(fileHandle)
+      setHasSavedFolder(true)
+      await readZipHandle(fileHandle)
+    } catch (err) {
+      if (err.name !== 'AbortError') console.error('Lỗi khi xử lý zip:', err)
     }
+  }
+
+  async function clearImages() {
+    imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
+    setImages([])
+    await clearFolderHandle()
+    setHasSavedFolder(false)
   }
 
   function removeImage(imageId) {
@@ -645,9 +487,7 @@ export default function App() {
         URL.revokeObjectURL(imageToRemove.url)
       }
 
-      const newImages = current.filter((image) => image.id !== imageId)
-      saveImagesToStorage(newImages)
-      return newImages
+      return current.filter((image) => image.id !== imageId)
     })
   }
 
@@ -665,28 +505,37 @@ export default function App() {
             <button type="button" className="primary-btn" onClick={openZipPicker}>
               Chọn file ZIP
             </button>
-            <button type="button" className="ghost-btn" onClick={clearImages} disabled={!images.length}>
+            <button type="button" className="ghost-btn" onClick={clearImages} disabled={!images.length && !hasSavedFolder}>
               Xóa tất cả
             </button>
           </div>
 
-          <input
-            ref={folderInputRef}
-            className="hidden-input"
-            type="file"
-            accept="image/*"
-            multiple
-            webkitdirectory="true"
-            onChange={(event) => handleFiles(event.target.files)}
-          />
-
-          <input
-            ref={zipInputRef}
-            className="hidden-input"
-            type="file"
-            accept=".zip"
-            onChange={(event) => handleFiles(event.target.files)}
-          />
+          {showReloadPrompt && (
+            <div className="reload-overlay" style={{
+              marginTop: '16px',
+              padding: '16px',
+              background: 'rgba(255,255,255,0.05)',
+              borderRadius: '8px',
+              border: '1px solid rgba(255,255,255,0.1)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '16px'
+            }}>
+              <div>
+                <strong style={{ display: 'block', color: 'white' }}>Phát hiện dữ liệu ảnh cũ (Folder/ZIP)!</strong>
+                <span style={{ fontSize: '0.9em', color: 'rgba(255,255,255,0.7)' }}>Bạn có muốn khôi phục lại dữ liệu này không? (Trình duyệt sẽ yêu cầu quyền đọc)</span>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button type="button" className="primary-btn" onClick={reloadFolder}>
+                  Đồng ý tải lại
+                </button>
+                <button type="button" className="ghost-btn" onClick={() => setShowReloadPrompt(false)}>
+                  Bỏ qua
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="hero-stats">
             <article>
