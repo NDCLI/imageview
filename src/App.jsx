@@ -79,8 +79,10 @@ export default function App() {
   useEffect(() => {
     if (!isViewerMode) {
       window.name = 'image-preview-main'
+      document.title = 'Preview'
     } else {
       window.name = 'image-viewer-tab'
+      document.title = 'Images Preview'
     }
   }, [isViewerMode])
 
