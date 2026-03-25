@@ -83,6 +83,8 @@ export default function App() {
     initialRouteState.isViewer ? readViewerImagesFromStorage() : [],
   )
   const [viewerIndex, setViewerIndex] = useState(initialRouteState.index)
+  const [searchQuery, setSearchQuery] = useState('')
+  const searchInputRef = useRef(null)
   const viewerTxRef = useRef({ scale: 1, panX: 0, panY: 0 })
   const [viewerTx, setViewerTx] = useState({ scale: 1, panX: 0, panY: 0 })
   const viewerStageRef = useRef(null)
@@ -143,7 +145,12 @@ export default function App() {
     }
 
     writeViewerIndexToUrl(safeIndex)
-  }, [isViewerMode, viewerImages.length, viewerIndex])
+    if (viewerImages[safeIndex]) {
+      if (document.activeElement !== searchInputRef.current) {
+        setSearchQuery(viewerImages[safeIndex].name)
+      }
+    }
+  }, [isViewerMode, viewerImages, viewerIndex])
 
   function openImageInNewTab(image) {
     const snapshot = imagesRef.current.map((currentImage) => ({
@@ -278,6 +285,19 @@ export default function App() {
     }
 
     function onKeyDown(event) {
+      if ((event.ctrlKey || event.metaKey) && (event.key === 'f' || event.key === 'F')) {
+        event.preventDefault()
+        if (searchInputRef.current) {
+          searchInputRef.current.focus()
+          searchInputRef.current.select()
+        }
+        return
+      }
+
+      if (['INPUT', 'TEXTAREA'].includes(event.target.tagName)) {
+        return
+      }
+
       if (event.key === 'ArrowRight' || event.key === 'f' || event.key === 'F') {
         goToNextImage()
       } else if (event.key === 'ArrowLeft' || event.key === 'd' || event.key === 'D') {
@@ -295,6 +315,9 @@ export default function App() {
 
   function handleViewerMouseDown(event) {
     event.preventDefault()
+    if (searchInputRef.current) {
+      searchInputRef.current.blur()
+    }
     viewerDragRef.current = { lastX: event.clientX, lastY: event.clientY }
     document.body.style.cursor = 'grabbing'
   }
@@ -347,9 +370,43 @@ export default function App() {
                   }}
                 />
               </div>
-              <p className="viewer-meta">
-                {activeImage.name} • {viewerIndex + 1}/{viewerImages.length} • {activeImage.width} x {activeImage.height} • Zoom {Math.round(viewerTx.scale * 100)}% • ← → để chuyển ảnh
-              </p>
+              <div className="viewer-meta" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => {
+                    const query = e.target.value;
+                    setSearchQuery(query);
+                    if (query) {
+                      const foundIndex = viewerImages.findIndex(img => img.name.toLowerCase().includes(query.toLowerCase()));
+                      if (foundIndex !== -1 && foundIndex !== viewerIndex) {
+                        setViewerIndex(foundIndex);
+                      }
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === 'Escape') {
+                      e.target.blur()
+                    }
+                  }}
+                  onFocus={(e) => e.target.select()}
+                  style={{
+                    background: 'rgba(0, 0, 0, 0.5)',
+                    border: '1px solid rgba(255, 255, 255, 0.2)',
+                    color: '#fff',
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    outline: 'none',
+                    minWidth: '300px',
+                    fontFamily: 'inherit',
+                    fontSize: 'inherit'
+                  }}
+                  placeholder="Dán hoặc nhập tên ảnh để tìm..."
+                  title="Tìm kiếm tên ảnh"
+                />
+                <span>• {viewerIndex + 1}/{viewerImages.length} • {activeImage.width} x {activeImage.height} • Zoom {Math.round(viewerTx.scale * 100)}% • ← → để chuyển</span>
+              </div>
             </>
           ) : (
             <div className="empty-gallery">
