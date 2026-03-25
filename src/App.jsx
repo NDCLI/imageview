@@ -43,36 +43,19 @@ function writeViewerIndexToUrl(index) {
   window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`)
 }
 
-function readImageDimensions(url) {
-  return new Promise((resolve, reject) => {
-    const image = new Image()
-    image.onload = () => {
-      resolve({ width: image.naturalWidth, height: image.naturalHeight })
-    }
-    image.onerror = () => reject(new Error('Không đọc được ảnh'))
-    image.src = url
-  })
-}
-
-async function createImageRecord(file, indexSeed, overrideName = null) {
+function createImageRecord(file, indexSeed, overrideName = null) {
   const url = URL.createObjectURL(file)
+  const displayName = overrideName || file.name
 
-  try {
-    const dimensions = await readImageDimensions(url)
-    const displayName = overrideName || file.name
-
-    return {
-      id: `${displayName}-${file.lastModified}-${indexSeed}`,
-      file,
-      url,
-      name: displayName,
-      size: file.size,
-      type: file.type || 'image/*',
-      ...dimensions,
-    }
-  } catch (error) {
-    URL.revokeObjectURL(url)
-    throw error
+  return {
+    id: `${displayName}-${file.lastModified}-${indexSeed}`,
+    file,
+    url,
+    name: displayName,
+    size: file.size,
+    type: file.type || 'image/*',
+    width: 0,
+    height: 0,
   }
 }
 
@@ -459,8 +442,8 @@ export default function App() {
       await traverse(dirHandle, dirHandle.name + '/')
       imageData.sort((a, b) => a.name.localeCompare(b.name))
       if (!imageData.length) return
-      const nextRecords = await Promise.all(
-        imageData.map((data, index) => createImageRecord(data.file, `${Date.now()}-${index}`, data.name))
+      const nextRecords = imageData.map((data, index) =>
+        createImageRecord(data.file, `${Date.now()}-${index}`, data.name)
       )
       startTransition(() => {
         setImages(nextRecords)
@@ -505,8 +488,8 @@ export default function App() {
       imageData.sort((a, b) => a.name.localeCompare(b.name))
       if (!imageData.length) return
       
-      const nextRecords = await Promise.all(
-        imageData.map((data, index) => createImageRecord(data.file, `${Date.now()}-${index}`, data.name))
+      const nextRecords = imageData.map((data, index) =>
+        createImageRecord(data.file, `${Date.now()}-${index}`, data.name)
       )
       startTransition(() => {
         setImages(nextRecords)
@@ -548,6 +531,16 @@ export default function App() {
 
       return current.filter((image) => image.id !== imageId)
     })
+  }
+
+  function handleThumbnailLoad(imageId, event) {
+    const { naturalWidth, naturalHeight } = event.target
+    if (!naturalWidth) return
+    setImages((current) =>
+      current.map((img) =>
+        img.id === imageId ? { ...img, width: naturalWidth, height: naturalHeight } : img
+      )
+    )
   }
 
   return (
@@ -631,13 +624,13 @@ export default function App() {
               {images.map((image) => (
                 <article key={image.id} className="preview-item" role="listitem">
                   <button type="button" className="preview-button" onClick={() => openImageInNewTab(image)}>
-                    <img src={image.url} alt={image.name} />
+                    <img src={image.url} alt={image.name} onLoad={(e) => handleThumbnailLoad(image.id, e)} />
                   </button>
 
                   <div className="preview-meta">
                     <strong title={image.name}>{image.name}</strong>
                     <span>
-                      {image.width} x {image.height}
+                      {image.width ? `${image.width} x ${image.height}` : '...'}
                     </span>
                   </div>
 
