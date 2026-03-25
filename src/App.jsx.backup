@@ -3,7 +3,6 @@ import JSZip from 'jszip'
 
 const PREVIEW_TAB_NAME = 'local-image-preview'
 const VIEWER_STATE_KEY = 'local-image-viewer-state'
-const GALLERY_STATE_KEY = 'local-image-gallery-state'
 const MIN_ZOOM = 1
 const MAX_ZOOM = 6
 const ZOOM_STEP = 0.2
@@ -54,70 +53,8 @@ function readImageDimensions(url) {
   })
 }
 
-function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = reject
-    reader.readAsDataURL(file)
-  })
-}
-
-function saveImagesToStorage(images) {
-  try {
-    const serializableImages = images.map((image) => ({
-      id: image.id,
-      base64: image.base64,
-      name: image.name,
-      size: image.size,
-      type: image.type,
-      width: image.width,
-      height: image.height,
-    }))
-    localStorage.setItem(GALLERY_STATE_KEY, JSON.stringify(serializableImages))
-  } catch (error) {
-    console.error('Lỗi khi lưu ảnh vào storage:', error)
-  }
-}
-
-function loadImagesFromStorage() {
-  try {
-    const raw = localStorage.getItem(GALLERY_STATE_KEY)
-    if (!raw) return []
-
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-
-    return parsed.map((item) => {
-      const blob = dataURLToBlob(item.base64)
-      const url = URL.createObjectURL(blob)
-      return {
-        ...item,
-        file: blob,
-        url,
-      }
-    })
-  } catch (error) {
-    console.error('Lỗi khi tải ảnh từ storage:', error)
-    return []
-  }
-}
-
-function dataURLToBlob(dataURL) {
-  const arr = dataURL.split(',')
-  const mime = arr[0].match(/:(.*?);/)[1]
-  const bstr = atob(arr[1])
-  let n = bstr.length
-  const u8arr = new Uint8Array(n)
-  while (n--) {
-    u8arr[n] = bstr.charCodeAt(n)
-  }
-  return new Blob([u8arr], { type: mime })
-}
-
 async function createImageRecord(file, indexSeed) {
   const url = URL.createObjectURL(file)
-  const base64 = await fileToBase64(file)
 
   try {
     const dimensions = await readImageDimensions(url)
@@ -126,7 +63,6 @@ async function createImageRecord(file, indexSeed) {
       id: `${file.name}-${file.lastModified}-${indexSeed}`,
       file,
       url,
-      base64,
       name: file.name,
       size: file.size,
       type: file.type || 'image/*',
@@ -151,9 +87,7 @@ export default function App() {
   const viewerDragRef = useRef(null)
   const isViewerMode = initialRouteState.isViewer
 
-  const [images, setImages] = useState(() =>
-    initialRouteState.isViewer ? [] : loadImagesFromStorage(),
-  )
+  const [images, setImages] = useState([])
   const [isLoading, setIsLoading] = useState(false)
   const folderInputRef = useRef(null)
   const zipInputRef = useRef(null)
@@ -466,11 +400,7 @@ export default function App() {
       )
 
       startTransition(() => {
-        setImages((current) => {
-          const newImages = [...current, ...nextRecords]
-          saveImagesToStorage(newImages)
-          return newImages
-        })
+        setImages((current) => [...current, ...nextRecords])
       })
     } finally {
       setIsLoading(false)
@@ -488,7 +418,6 @@ export default function App() {
   function clearImages() {
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
-    localStorage.removeItem(GALLERY_STATE_KEY)
 
     if (folderInputRef.current) {
       folderInputRef.current.value = ''
@@ -506,9 +435,7 @@ export default function App() {
         URL.revokeObjectURL(imageToRemove.url)
       }
 
-      const newImages = current.filter((image) => image.id !== imageId)
-      saveImagesToStorage(newImages)
-      return newImages
+      return current.filter((image) => image.id !== imageId)
     })
   }
 
