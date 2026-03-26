@@ -94,7 +94,6 @@ export default function App() {
   const imagesRef = useRef([])
 
   const [visibleCount, setVisibleCount] = useState(50)
-  const observerTarget = useRef(null)
 
   useEffect(() => {
     getFolderHandle().then(handle => {
@@ -110,23 +109,6 @@ export default function App() {
   useEffect(() => {
     setVisibleCount(50)
   }, [images])
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) {
-          setVisibleCount((prev) => Math.min(prev + 50, images.length))
-        }
-      },
-      { threshold: 0.1, rootMargin: '200px' }
-    )
-
-    if (observerTarget.current) {
-      observer.observe(observerTarget.current)
-    }
-
-    return () => observer.disconnect()
-  }, [images.length])
 
   useEffect(() => {
     imagesRef.current = images
@@ -774,7 +756,20 @@ export default function App() {
                 </article>
               ))}
               {visibleCount < images.length && (
-                <div ref={observerTarget} style={{ height: '20px', width: '100%', gridColumn: '1 / -1' }} />
+                <div className="show-more-actions" style={{
+                  gridColumn: '1 / -1',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  gap: '12px',
+                  padding: '40px 0'
+                }}>
+                  <button type="button" className="primary-btn" onClick={() => setVisibleCount(prev => prev + 100)}>
+                    Xem thêm 100 ảnh
+                  </button>
+                  <button type="button" className="ghost-btn" onClick={() => setVisibleCount(images.length)}>
+                    Xem tất cả {images.length} ảnh
+                  </button>
+                </div>
               )}
             </div>
           )}
