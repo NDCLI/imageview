@@ -270,7 +270,7 @@ export default function App() {
     const displayImages = images.length > 0 ? images : viewerImages
     const activeImage = displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)]
     if (!activeImage || activeImage.width === 0 || activeImage.height === 0) {
-      return { scale, panX: 0, panY: 0 }
+      return tx
     }
 
     const imgWidth = activeImage.width * scale
@@ -453,6 +453,7 @@ export default function App() {
                 <img
                   src={activeImage.url}
                   alt={activeImage.name}
+                  onLoad={handleViewerImageLoad}
                   className="viewer-image"
                   style={{
                     transform: `translate(${viewerTx.panX}px, ${viewerTx.panY}px) scale(${viewerTx.scale})`,
@@ -654,6 +655,28 @@ export default function App() {
         img.id === imageId ? { ...img, width: naturalWidth, height: naturalHeight } : img
       )
     )
+  }
+
+  function handleViewerImageLoad(event) {
+    const { naturalWidth, naturalHeight } = event.target
+    if (!naturalWidth) return
+    const displayImages = images.length > 0 ? images : viewerImages
+    const activeImage = displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)]
+    if (!activeImage || (activeImage.width === naturalWidth && activeImage.height === naturalHeight)) return
+
+    if (images.length > 0) {
+      setImages((current) =>
+        current.map((img) =>
+          img.id === activeImage.id ? { ...img, width: naturalWidth, height: naturalHeight } : img
+        )
+      )
+    } else {
+      setViewerImages((current) =>
+        current.map((img) =>
+          img.id === activeImage.id ? { ...img, width: naturalWidth, height: naturalHeight } : img
+        )
+      )
+    }
   }
 
   return (
