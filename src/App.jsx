@@ -108,7 +108,7 @@ export default function App() {
 
   useEffect(() => {
     setVisibleCount(50)
-  }, [images])
+  }, [images.length])
 
   useEffect(() => {
     imagesRef.current = images
