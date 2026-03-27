@@ -5,63 +5,12 @@ import { getFolderHandle, setFolderHandle, clearFolderHandle } from './storage'
 const PREVIEW_TAB_NAME = 'image-viewer-tab'
 
 const VIEWER_STATE_KEY = 'local-image-viewer-state'
-const MIN_ZOOM = 0.05
-const MAX_ZOOM = 100
+const MIN_ZOOM = 1
+const MAX_ZOOM = 6
+const ZOOM_STEP = 0.2
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max)
-}
-
-function parseAnnotations(xmlText) {
-  const parser = new DOMParser()
-  const xmlDoc = parser.parseFromString(xmlText, 'text/xml')
-  const labels = {}
-  const images = {}
-
-  // Parse labels/colors
-  const labelNodes = xmlDoc.querySelectorAll('label')
-  labelNodes.forEach(node => {
-    const name = node.querySelector('name')?.textContent
-    const color = node.querySelector('color')?.textContent
-    if (name && color) labels[name] = color
-  })
-
-  // Parse images and boxes
-  const imageNodes = xmlDoc.querySelectorAll('image')
-  imageNodes.forEach(node => {
-    const name = node.getAttribute('name')
-    const id = node.getAttribute('id')
-    const width = parseInt(node.getAttribute('width'))
-    const height = parseInt(node.getAttribute('height'))
-    const boxes = []
-    const boxNodes = node.querySelectorAll('box')
-    boxNodes.forEach(box => {
-      boxes.push({
-        label: box.getAttribute('label'),
-        xtl: parseFloat(box.getAttribute('xtl')),
-        ytl: parseFloat(box.getAttribute('ytl')),
-        xbr: parseFloat(box.getAttribute('xbr')),
-        ybr: parseFloat(box.getAttribute('ybr'))
-      })
-    })
-    images[name] = { id, width, height, boxes }
-  })
-
-  return { labels, images }
-}
-
-function getFitState(imageWidth, imageHeight, stage) {
-  if (!stage || !imageWidth || !imageHeight) return { scale: 1, panX: 0, panY: 0 }
-  
-  const bounds = stage.getBoundingClientRect()
-  const sw = bounds.width
-  const sh = bounds.height
-  
-  const scale = Math.min(sw / imageWidth, sh / imageHeight, 1.5) // Max 1.5x upscaling automatically
-  const panX = (sw - imageWidth * scale) / 2
-  const panY = (sh - imageHeight * scale) / 2
-  
-  return { scale, panX, panY }
 }
 
 
@@ -100,7 +49,7 @@ function createImageRecord(file, indexSeed, overrideName = null) {
   const url = URL.createObjectURL(file)
   const displayName = overrideName || file.name
 
-  const record = {
+  return {
     id: `${displayName}-${file.lastModified}-${indexSeed}`,
     file,
     url,
@@ -110,16 +59,6 @@ function createImageRecord(file, indexSeed, overrideName = null) {
     width: 0,
     height: 0,
   }
-
-  // Pre-load dimensions to avoid layout shift
-  const img = new Image()
-  img.onload = () => {
-    record.width = img.naturalWidth
-    record.height = img.naturalHeight
-  }
-  img.src = url
-
-  return record
 }
 
 export default function App() {
@@ -133,16 +72,6 @@ export default function App() {
   const searchInputRef = useRef(null)
   const viewerTxRef = useRef({ scale: 1, panX: 0, panY: 0 })
   const [viewerTx, setViewerTx] = useState({ scale: 1, panX: 0, panY: 0 })
-  const [annotations, setAnnotations] = useState({ labels: {}, images: {} })
-  const [viewerAnnotations, setViewerAnnotations] = useState(() => {
-    if (!initialRouteState.isViewer) return { labels: {}, images: {} }
-    try {
-      const raw = localStorage.getItem('local-image-viewer-annotations')
-      return raw ? JSON.parse(raw) : { labels: {}, images: {} }
-    } catch {
-      return { labels: {}, images: {} }
-    }
-  })
   const viewerStageRef = useRef(null)
   const viewerDragRef = useRef(null)
   const isViewerMode = initialRouteState.isViewer
@@ -162,7 +91,6 @@ export default function App() {
   const [loadDone, setLoadDone] = useState(false)
   const [hasSavedFolder, setHasSavedFolder] = useState(false)
   const [showReloadPrompt, setShowReloadPrompt] = useState(false)
-  const [showBoxes, setShowBoxes] = useState(false)
   const imagesRef = useRef([])
 
   const [visibleCount, setVisibleCount] = useState(50)
@@ -171,8 +99,7 @@ export default function App() {
     getFolderHandle().then(handle => {
       if (handle) {
         setHasSavedFolder(true)
-        // Hiển thị thông báo nếu chưa có ảnh nào được nạp (persistence qua restart)
-        if (!isViewerMode && imagesRef.current.length === 0) {
+        if (!isViewerMode) {
           setShowReloadPrompt(true)
         }
       }
@@ -287,11 +214,6 @@ export default function App() {
       }),
     )
 
-    localStorage.setItem(
-      'local-image-viewer-annotations',
-      JSON.stringify(annotations)
-    )
-
     // Force open in new tab with explicit target (reusing the same viewer tab)
     const viewerUrl = `${window.location.pathname}?viewer=1&index=${currentIndex}`
     const newTab = window.open(viewerUrl, PREVIEW_TAB_NAME)
@@ -338,9 +260,8 @@ export default function App() {
 
     // Allow free panning with larger bounds for zoomed images
     // This lets users drag fully across the image at all zoom levels
-    // Relax constraints significantly for freedom of movement (like CVAT)
-    const maxPanX = imgWidth + stageWidth * 5
-    const maxPanY = imgHeight + stageHeight * 5
+    const maxPanX = imgWidth + stageWidth
+    const maxPanY = imgHeight + stageHeight
 
     const constrainedPanX = Math.min(Math.max(panX, -maxPanX), maxPanX)
     const constrainedPanY = Math.min(Math.max(panY, -maxPanY), maxPanY)
@@ -349,19 +270,9 @@ export default function App() {
   }
 
   function resetViewerZoom() {
-    const stage = viewerStageRef.current
-    const displayImages = images.length > 0 ? images : viewerImages
-    const activeImage = displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)]
-    
-    if (stage && activeImage && activeImage.width > 0) {
-      const fit = getFitState(activeImage.width, activeImage.height, stage)
-      viewerTxRef.current = fit
-      setViewerTx(fit)
-    } else {
-      const reset = { scale: 1, panX: 0, panY: 0 }
-      viewerTxRef.current = reset
-      setViewerTx(reset)
-    }
+    const reset = { scale: 1, panX: 0, panY: 0 }
+    viewerTxRef.current = reset
+    setViewerTx(reset)
   }
 
   useEffect(() => {
@@ -393,22 +304,14 @@ export default function App() {
       const ix = (cx - panX) / scale
       const iy = (cy - panY) / scale
 
-      // Multiplicative zoom (like CVAT/Google Maps/etc)
-      // deltaY < 0 means scroll up (zoom in)
-      const zoomFactor = event.deltaY < 0 ? 1.1 : 0.9
-      let newScale = scale * zoomFactor
+      // Apply new scale
+      const newScale = clamp(scale + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP), MIN_ZOOM, MAX_ZOOM)
 
-      // Clamp new scale
-      newScale = Math.min(Math.max(newScale, MIN_ZOOM), MAX_ZOOM)
-
-      // Calculate new pan to keep the same image point (ix, iy) under the cursor (cx, cy)
+      // Calculate new pan to keep the same point under cursor
       const newPanX = cx - ix * newScale
       const newPanY = cy - iy * newScale
 
       const newTx = { scale: newScale, panX: newPanX, panY: newPanY }
-      
-      // Update with the new transformation
-      // Note: We might want to keep the constraint, but let's see if it's too restrictive
       const constrainedTx = constrainViewerPan(newTx, stage)
       updateViewerTx(constrainedTx)
     }
@@ -513,9 +416,6 @@ export default function App() {
               <button type="button" className="primary-btn" onClick={reloadFolder} style={{ padding: '8px 16px', fontSize: '0.9em' }}>
                 Tải lại
               </button>
-              <button type="button" className="ghost-btn" onClick={skipReload} style={{ padding: '8px 16px', fontSize: '0.9em' }}>
-                Bỏ qua
-              </button>
             </div>
           </div>
         )}
@@ -532,137 +432,20 @@ export default function App() {
                 onMouseLeave={handleViewerMouseUp}
                 onDoubleClick={handleViewerDoubleClick}
               >
-                <div
-                  className="viewer-image-container"
+                <img
+                  src={activeImage.url}
+                  alt={activeImage.name}
+                  onLoad={handleViewerImageLoad}
+                  className="viewer-image"
                   style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
                     transform: `translate(${viewerTx.panX}px, ${viewerTx.panY}px) scale(${viewerTx.scale})`,
                     transformOrigin: '0 0',
-                    width: activeImage.width ? `${activeImage.width}px` : 'auto',
-                    height: activeImage.height ? `${activeImage.height}px` : 'auto',
                   }}
-                >
-                  <img
-                    src={activeImage.url}
-                    alt={activeImage.name}
-                    onLoad={handleViewerImageLoad}
-                    className="viewer-image"
-                    style={{
-                      display: 'block',
-                      width: '100%',
-                      height: '100%',
-                    }}
-                    onError={() => {
-                      // Mất file (Blob URL hỏng do tab chính bị đóng)
-                      setShowReloadPrompt(true)
-                    }}
-                  />
-                  {showBoxes && (
-                    <svg
-                      className="viewer-annotations"
-                      viewBox={(() => {
-                        const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                        const activeName = activeImage.name.toLowerCase();
-                        const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
-                        const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
-                        
-                        const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                          const kn = k.toLowerCase();
-                          if (kn === activeName || kn === simpleActiveName) return true;
-                          const skn = k.split('/').pop().toLowerCase();
-                          if (skn === simpleActiveName) return true;
-                          const ckn = skn.replace(/\.[^/.]+$/, "");
-                          if (ckn === cleanActiveName) return true;
-                          
-                          const ann = currentAnnotations.images[k];
-                          if (ann && ann.id !== null) {
-                             const idStr = ann.id.toString();
-                             if (cleanActiveName === idStr) return true;
-                             const nameNum = cleanActiveName.match(/\d+$/)?.[0];
-                             if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
-                          }
-                          return false;
-                        });
-                        
-                        const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
-                        if (annotationData && annotationData.width && annotationData.height) {
-                          return `0 0 ${annotationData.width} ${annotationData.height}`;
-                        }
-                        return activeImage.width && activeImage.height ? `0 0 ${activeImage.width} ${activeImage.height}` : undefined;
-                      })()}
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        width: '100%',
-                        height: '100%',
-                        pointerEvents: 'none',
-                      }}
-                    >
-                      {(() => {
-                        const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                        const activeName = activeImage.name.toLowerCase();
-                        const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
-                        const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
-                        
-                        const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                          const kn = k.toLowerCase();
-                          if (kn === activeName || kn === simpleActiveName) return true;
-                          const skn = k.split('/').pop().toLowerCase();
-                          if (skn === simpleActiveName) return true;
-                          const ckn = skn.replace(/\.[^/.]+$/, "");
-                          if (ckn === cleanActiveName) return true;
-                          
-                          const ann = currentAnnotations.images[k];
-                          if (ann && ann.id !== null) {
-                             const idStr = ann.id.toString();
-                             if (cleanActiveName === idStr) return true;
-                             const nameNum = cleanActiveName.match(/\d+$/)?.[0];
-                             if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
-                          }
-                          return false;
-                        });
-                        
-                        const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
-                        const boxes = annotationData?.boxes || [];
-
-                        return boxes.map((box, i) => {
-                          const labelColor = currentAnnotations.labels[box.label] || '#ff0000'
-                          return (
-                            <g key={i}>
-                              <rect
-                                x={box.xtl}
-                                y={box.ytl}
-                                width={box.xbr - box.xtl}
-                                height={box.ybr - box.ytl}
-                                fill="transparent"
-                                stroke={labelColor}
-                                strokeWidth={2 / viewerTx.scale}
-                              />
-                              <text
-                                x={box.xtl}
-                                y={box.ytl - 2 / viewerTx.scale}
-                                fill="#ffffff"
-                                style={{
-                                  fontSize: `${12 / viewerTx.scale}px`,
-                                  fontWeight: 'bold',
-                                  paintOrder: 'stroke',
-                                  stroke: labelColor,
-                                  strokeWidth: `${3 / viewerTx.scale}px`,
-                                  dominantBaseline: 'text-after-edge'
-                                }}
-                              >
-                                {box.label}
-                              </text>
-                            </g>
-                          )
-                        });
-                      })()}
-                    </svg>
-                  )}
-                </div>
+                  onError={() => {
+                    // Mất file (Blob URL hỏng do tab chính bị đóng)
+                    setShowReloadPrompt(true)
+                  }}
+                />
               </div>
               <div className="viewer-meta" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
                 <input
@@ -699,43 +482,7 @@ export default function App() {
                   placeholder="Dán hoặc nhập tên ảnh để tìm..."
                   title="Tìm kiếm tên ảnh"
                 />
-                <button
-                  className={`box-toggle-btn ${showBoxes ? 'active' : ''}`}
-                  onClick={() => setShowBoxes(!showBoxes)}
-                  title={showBoxes ? "Ẩn các box annotation" : "Hiện các box annotation"}
-                >
-                  {showBoxes ? 'Hide Boxes' : 'Show Boxes'}
-                </button>
-                <span>
-                  • {viewerIndex + 1}/{displayImages.length} 
-                  <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
-                  {(() => {
-                    const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                    const activeName = activeImage.name.toLowerCase();
-                    const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
-                    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
-                    const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                      const kn = k.toLowerCase();
-                      if (kn === activeName || kn === simpleActiveName) return true;
-                      const skn = k.split('/').pop().toLowerCase();
-                      if (skn === simpleActiveName) return true;
-                      const ckn = skn.replace(/\.[^/.]+$/, "");
-                      if (ckn === cleanActiveName) return true;
-                      const ann = currentAnnotations.images[k];
-                      if (ann && ann.id !== null) {
-                         const idStr = ann.id.toString();
-                         if (cleanActiveName === idStr) return true;
-                         const nameNum = cleanActiveName.match(/\d+$/)?.[0];
-                         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
-                      }
-                      return false;
-                    });
-                    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
-                    return annotationData ? `ID: ${annotationData.id}` : 'No ID';
-                  })()}
-                  <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
-                  {activeImage.width} x {activeImage.height} • Zoom {Math.round(viewerTx.scale * 100)}% • ← → để chuyển
-                </span>
+                <span>• {viewerIndex + 1}/{displayImages.length} • {activeImage.width} x {activeImage.height} • Zoom {Math.round(viewerTx.scale * 100)}% • ← → để chuyển</span>
               </div>
             </>
           ) : (
@@ -774,33 +521,19 @@ export default function App() {
     setIsLoading(true)
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
-    setAnnotations({ labels: {}, images: {} })
     const imageData = []
-    let annotationFile = null
     try {
       async function traverse(handle, currentPath = '') {
         for await (const entry of handle.values()) {
-          if (entry.kind === 'file') {
-            if (entry.name.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
-              const file = await entry.getFile()
-              imageData.push({ file, name: currentPath + entry.name })
-            } else if (entry.name === 'annotations.xml') {
-              annotationFile = await entry.getFile()
-            }
+          if (entry.kind === 'file' && entry.name.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+            const file = await entry.getFile()
+            imageData.push({ file, name: currentPath + entry.name })
           } else if (entry.kind === 'directory') {
             await traverse(entry, currentPath + entry.name + '/')
           }
         }
       }
       await traverse(dirHandle, dirHandle.name + '/')
-      
-      if (annotationFile) {
-        const text = await annotationFile.text()
-        const parsed = parseAnnotations(text)
-        setAnnotations(parsed)
-      }
-
-
       imageData.sort((a, b) => a.name.localeCompare(b.name))
       if (!imageData.length) return
       const nextRecords = imageData.map((data, index) =>
@@ -832,32 +565,23 @@ export default function App() {
     setIsLoading(true)
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
-    setAnnotations({ labels: {}, images: {} })
     try {
       const zipFile = await fileHandle.getFile()
       const zip = new JSZip()
       const zipContent = await zip.loadAsync(zipFile)
 
       const imageData = []
-      let annFileContent = null
-
       for (const [path, zipEntry] of Object.entries(zipContent.files)) {
-        if (zipEntry.dir) continue
-        if (path.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
-          const blob = await zipEntry.async('blob')
-          const imageFile = new File([blob], path, { type: blob.type || 'image/*' })
-          imageData.push({ file: imageFile, name: path })
-        } else if (path.endsWith('annotations.xml')) {
-          annFileContent = await zipEntry.async('text')
-        }
-      }
-
-      if (annFileContent) {
-        const parsed = parseAnnotations(annFileContent)
-        setAnnotations(parsed)
+        if (zipEntry.dir || !path.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) continue
+        const blob = await zipEntry.async('blob')
+        // Lấy tên zip làm thư mục gốc (nếu zip file không gom chung vào 1 folder to) hoặc lấy luôn path trong zip
+        // `path` của ZIP mặc định đã chứa full folder hierarchy như "folder/image.png", nên dùng trực tiếp `path` là tốt nhất
+        const imageFile = new File([blob], path, { type: blob.type || 'image/*' })
+        imageData.push({ file: imageFile, name: path })
       }
 
       imageData.sort((a, b) => a.name.localeCompare(b.name))
+      if (!imageData.length) return
 
       const nextRecords = imageData.map((data, index) =>
         createImageRecord(data.file, `${Date.now()}-${index}`, data.name)
@@ -890,13 +614,6 @@ export default function App() {
   async function clearImages() {
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
-    setAnnotations({ labels: {}, images: {} })
-    await clearFolderHandle()
-    setHasSavedFolder(false)
-  }
-
-  async function skipReload() {
-    setShowReloadPrompt(false)
     await clearFolderHandle()
     setHasSavedFolder(false)
   }
@@ -983,7 +700,7 @@ export default function App() {
                 <button type="button" className="primary-btn" onClick={reloadFolder}>
                   Đồng ý tải lại
                 </button>
-                <button type="button" className="ghost-btn" onClick={skipReload}>
+                <button type="button" className="ghost-btn" onClick={() => setShowReloadPrompt(false)}>
                   Bỏ qua
                 </button>
               </div>
