@@ -4,10 +4,10 @@
 
 ## 🚀 Tính năng nổi bật
 
-### 1. Xử lý ZIP (JSZip)
-- **Tin cậy**: Sử dụng `JSZip` để nạp và quản lý ảnh từ tập tin ZIP.
-- **Tính ổn định**: Đảm bảo tương thích cao với nhiều loại trình duyệt và tệp tin ZIP khác nhau.
-- **Hỗ trợ nạp lại**: Tự động nhận diện và đề xuất nạp lại dữ liệu cũ từ bộ nhớ tạm.
+### 1. Xử lý ZIP (fflate + Web Worker)
+- **Hiệu năng cao**: Sử dụng `fflate` để giải nén ZIP với tốc độ vượt trội.
+- **Không treo UI**: Toàn bộ quá trình giải nén được xử lý bởi **Web Worker**, đảm bảo giao diện luôn mượt mà (60 FPS) ngay cả khi nạp tệp ZIP lớn.
+- **Hỗ trợ nạp lại**: Tự động nhận diện và đề xuất nạp lại dữ liệu ZIP từ bộ nhớ tạm để tiết kiệm thời gian.
 
 ### 2. Hệ thống Tìm kiếm Thông minh (Smart Search)
 - **Tìm kiếm kép**: Tìm theo cả **Tên ảnh** và **Frame ID** tại một ô nhập liệu duy nhất.
