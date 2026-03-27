@@ -14,11 +14,42 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max)
 }
 
+function getAnnotationData(imageName, allAnns) {
+  if (!allAnns || !allAnns.images || !imageName) return null;
+  
+  const images = allAnns.images;
+  const lowerName = imageName.toLowerCase();
+  const simpleName = imageName.split('/').pop().toLowerCase();
+  const cleanName = simpleName.replace(/\.[^/.]+$/, "");
+
+  // 1. Exact match
+  if (images[imageName]) return images[imageName];
+  
+  // 2. Case-insensitive exact match
+  const keys = Object.keys(images);
+  let foundKey = keys.find(k => k.toLowerCase() === lowerName);
+  if (foundKey) return images[foundKey];
+
+  // 3. Basename match
+  foundKey = keys.find(k => k.split('/').pop().toLowerCase() === simpleName);
+  if (foundKey) return images[foundKey];
+
+  // 4. Extenion-less match
+  foundKey = keys.find(k => {
+    const sk = k.split('/').pop().toLowerCase().replace(/\.[^/.]+$/, "");
+    return sk === cleanName;
+  });
+  if (foundKey) return images[foundKey];
+
+  return null;
+}
+
 function parseAnnotations(xmlText) {
   const parser = new DOMParser()
   const xmlDoc = parser.parseFromString(xmlText, 'text/xml')
   const labels = {}
   const images = {}
+  const byId = {}
 
   // Parse labels/colors
   const labelNodes = xmlDoc.querySelectorAll('label')
@@ -46,10 +77,12 @@ function parseAnnotations(xmlText) {
         ybr: parseFloat(box.getAttribute('ybr'))
       })
     })
-    images[name] = { id, width, height, boxes }
+    const record = { id, width, height, boxes };
+    images[name] = record;
+    if (id) byId[id] = name;
   })
 
-  return { labels, images }
+  return { labels, images, byId }
 }
 
 function getFitState(imageWidth, imageHeight, stage) {
@@ -235,6 +268,14 @@ export default function App() {
     function handleStorage(event) {
       if (event.key === VIEWER_STATE_KEY) {
         setViewerImages(readViewerImagesFromStorage())
+      }
+      if (event.key === 'local-image-viewer-annotations') {
+        try {
+          const raw = localStorage.getItem('local-image-viewer-annotations')
+          if (raw) setViewerAnnotations(JSON.parse(raw))
+        } catch (err) {
+          console.error('Lỗi đồng bộ annotations:', err)
+        }
       }
     }
 
@@ -569,29 +610,8 @@ export default function App() {
                       className="viewer-annotations"
                       viewBox={(() => {
                         const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                        const activeName = activeImage.name.toLowerCase();
-                        const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
-                        const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
+                        const annotationData = getAnnotationData(activeImage.name, currentAnnotations);
                         
-                        const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                          const kn = k.toLowerCase();
-                          if (kn === activeName || kn === simpleActiveName) return true;
-                          const skn = k.split('/').pop().toLowerCase();
-                          if (skn === simpleActiveName) return true;
-                          const ckn = skn.replace(/\.[^/.]+$/, "");
-                          if (ckn === cleanActiveName) return true;
-                          
-                          const ann = currentAnnotations.images[k];
-                          if (ann && ann.id !== null) {
-                             const idStr = ann.id.toString();
-                             if (cleanActiveName === idStr) return true;
-                             const nameNum = cleanActiveName.match(/\d+$/)?.[0];
-                             if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
-                          }
-                          return false;
-                        });
-                        
-                        const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
                         if (annotationData && annotationData.width && annotationData.height) {
                           return `0 0 ${annotationData.width} ${annotationData.height}`;
                         }
@@ -608,29 +628,7 @@ export default function App() {
                     >
                       {(() => {
                         const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                        const activeName = activeImage.name.toLowerCase();
-                        const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
-                        const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
-                        
-                        const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                          const kn = k.toLowerCase();
-                          if (kn === activeName || kn === simpleActiveName) return true;
-                          const skn = k.split('/').pop().toLowerCase();
-                          if (skn === simpleActiveName) return true;
-                          const ckn = skn.replace(/\.[^/.]+$/, "");
-                          if (ckn === cleanActiveName) return true;
-                          
-                          const ann = currentAnnotations.images[k];
-                          if (ann && ann.id !== null) {
-                             const idStr = ann.id.toString();
-                             if (cleanActiveName === idStr) return true;
-                             const nameNum = cleanActiveName.match(/\d+$/)?.[0];
-                             if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
-                          }
-                          return false;
-                        });
-                        
-                        const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
+                        const annotationData = getAnnotationData(activeImage.name, currentAnnotations);
                         const boxes = annotationData?.boxes || [];
 
                         return boxes.map((box, i) => {
@@ -675,43 +673,30 @@ export default function App() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => {
-                    const query = e.target.value.toLowerCase();
-                    setSearchQuery(query);
+                    const query = e.target.value.trim().toLowerCase();
+                    setSearchQuery(e.target.value); // keep original in input
                     if (query) {
                       const currentAnns = images.length > 0 ? annotations : viewerAnnotations;
-                      const foundIndex = displayImages.findIndex(img => {
-                        // Match Name
-                        if (img.name.toLowerCase().includes(query)) return true;
-                        
-                        // Smart Search: Match Frame ID from XML
-                        const activeName = img.name.toLowerCase();
-                        const simpleName = img.name.split('/').pop().toLowerCase();
-                        const cleanName = simpleName.replace(/\.[^/.]+$/, "");
-                        
-                        const annKey = Object.keys(currentAnns.images).find(k => {
-                          const kn = k.toLowerCase();
-                          if (kn === activeName || kn === simpleName) return true;
-                          const skn = k.split('/').pop().toLowerCase();
-                          if (skn === simpleName) return true;
-                          const ckn = skn.replace(/\.[^/.]+$/, "");
-                          if (ckn === cleanName) return true;
-                          
-                          const ann = currentAnns.images[k];
-                          if (ann && ann.id !== null) {
-                             const idStr = ann.id.toString().toLowerCase();
-                             if (cleanName === idStr) return true;
-                             if (idStr.includes(query)) return true; // Direct ID match
-                          }
-                          return false;
+                      
+                      // 1. Exact ID match via byId map (highest priority)
+                      const targetNameById = currentAnns.byId?.[query];
+                      if (targetNameById) {
+                        const targetSimple = targetNameById.split('/').pop().toLowerCase();
+                        const idIndex = displayImages.findIndex(img => {
+                          const imgSimple = img.name.split('/').pop().toLowerCase();
+                          return imgSimple === targetSimple || imgSimple.replace(/\.[^/.]+$/, "") === targetSimple.replace(/\.[^/.]+$/, "");
                         });
                         
-                        if (annKey) {
-                          const ann = currentAnns.images[annKey];
-                          if (ann && ann.id !== null && ann.id.toString().toLowerCase().includes(query)) return true;
+                        if (idIndex !== -1 && idIndex !== viewerIndex) {
+                          setViewerIndex(idIndex);
+                          return;
                         }
-                        
-                        return false;
-                      });
+                      }
+
+                      // 2. Fallback: Name substring matching
+                      const foundIndex = displayImages.findIndex(img =>
+                        img.name.toLowerCase().includes(query)
+                      );
                       
                       if (foundIndex !== -1 && foundIndex !== viewerIndex) {
                         setViewerIndex(foundIndex);
@@ -750,26 +735,7 @@ export default function App() {
                   <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
                   {(() => {
                     const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                    const activeName = activeImage.name.toLowerCase();
-                    const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
-                    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
-                    const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                      const kn = k.toLowerCase();
-                      if (kn === activeName || kn === simpleActiveName) return true;
-                      const skn = k.split('/').pop().toLowerCase();
-                      if (skn === simpleActiveName) return true;
-                      const ckn = skn.replace(/\.[^/.]+$/, "");
-                      if (ckn === cleanActiveName) return true;
-                      const ann = currentAnnotations.images[k];
-                      if (ann && ann.id !== null) {
-                         const idStr = ann.id.toString();
-                         if (cleanActiveName === idStr) return true;
-                         const nameNum = cleanActiveName.match(/\d+$/)?.[0];
-                         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
-                      }
-                      return false;
-                    });
-                    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
+                    const annotationData = getAnnotationData(activeImage.name, currentAnnotations);
                     return annotationData ? `ID: ${annotationData.id}` : 'No ID';
                   })()}
                   <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
