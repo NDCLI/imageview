@@ -1,26 +1,36 @@
-# Local Image Compare
+# Image Viewer Pro - Stable Base
 
-Ứng dụng Vite + React để nạp nhiều ảnh local, tổng hợp ảnh trong một lưới để so sánh và mở từng ảnh trong tab mới.
+Ứng dụng Vite + React tối ưu hóa cho việc duyệt, so sánh và quản lý ảnh từ tập tin ZIP với tính ổn định cao.
 
-## Tính năng
+## 🚀 Tính năng nổi bật
 
-- Chọn nhiều ảnh local từ máy tính.
-- Chọn cả thư mục local để nạp toàn bộ ảnh trong thư mục.
-- Hiển thị danh sách ảnh kèm tên file, loại file, dung lượng và độ phân giải.
-- Ghim tối đa 4 ảnh vào khay so sánh.
-- Bấm vào ảnh bất kỳ để mở tab mới với kích thước mặc định.
-- Xóa từng ảnh hoặc xóa toàn bộ.
+### 1. Xử lý ZIP (JSZip)
+- **Tin cậy**: Sử dụng `JSZip` để nạp và quản lý ảnh từ tập tin ZIP.
+- **Tính ổn định**: Đảm bảo tương thích cao với nhiều loại trình duyệt và tệp tin ZIP khác nhau.
+- **Hỗ trợ nạp lại**: Tự động nhận diện và đề xuất nạp lại dữ liệu cũ từ bộ nhớ tạm.
 
-## Chạy dự án
+### 2. Hệ thống Tìm kiếm Thông minh (Smart Search)
+- **Tìm kiếm kép**: Tìm theo cả **Tên ảnh** và **Frame ID** tại một ô nhập liệu duy nhất.
+- **Phím tắt nhanh**: Nhấn `Ctrl + F` để kích hoạt nhanh ô tìm kiếm.
+- **Phản hồi tức thì**: Nhảy đến ảnh ngay khi tìm thấy kết quả.
 
-Cần cài Node.js trước, vì máy hiện tại chưa có `node`/`npm` trong PATH.
+### 3. Giao diện Người dùng Tối ưu (UI/UX)
+- **Footer Compact**: Toàn bộ thông số (Stats, Search, Frame, Resolution, Zoom) được ép trên **1 hàng ngang**, tiết kiệm diện tích tối đa cho việc hiển thị ảnh.
+- **Auto Reset Zoom**: Tự động căn chỉnh ảnh về chế độ `fit-to-screen` mỗi khi chuyển ảnh, đảm bảo trải nghiệm liền mạch bất kể độ phân giải.
+
+## 🛠️ Chạy dự án
 
 ```bash
+# Cài đặt dependencies
 npm install
+
+# Chạy ở chế độ development
 npm run dev
 ```
 
-## Cấu trúc
+## 📂 Miền dữ liệu (Data Domain)
+- Chỉ hỗ trợ nạp dữ liệu qua tập tin **.zip**.
+- Tự động parse file **annotations.xml** để hiển thị thông tin metadata/frame đi kèm.
 
-- `src/App.jsx`: logic nạp ảnh local, khay so sánh, mở ảnh trong tab mới.
-- `src/styles.css`: giao diện responsive.
+---
+*Phát triển bởi nkhcloud*
