@@ -145,6 +145,7 @@ export default function App() {
   })
   const viewerStageRef = useRef(null)
   const viewerDragRef = useRef(null)
+  const lastFitScaleRef = useRef(1)
   const isViewerMode = initialRouteState.isViewer
 
   useEffect(() => {
@@ -357,12 +358,31 @@ export default function App() {
       const fit = getFitState(activeImage.width, activeImage.height, stage)
       viewerTxRef.current = fit
       setViewerTx(fit)
+      lastFitScaleRef.current = fit.scale
     } else {
       const reset = { scale: 1, panX: 0, panY: 0 }
       viewerTxRef.current = reset
       setViewerTx(reset)
+      lastFitScaleRef.current = 1
     }
   }
+
+  // Handle maintaining zoom vs resetting to fit when switching images
+  useEffect(() => {
+    if (!isViewerMode) return
+
+    const currentScale = viewerTxRef.current.scale
+    const isAtFitScale = Math.abs(currentScale - lastFitScaleRef.current) < 0.01
+
+    if (isAtFitScale) {
+      // If we were at fit scale on the previous image, reset to fit on the new image
+      resetViewerZoom()
+    } else {
+      // If we are zoomed in/out, maintain current transformation
+      // but we might want to ensure the new image's dimensions are reflected if they changed
+      // (This is primarily handled by the container's width/height in render)
+    }
+  }, [viewerIndex])
 
   useEffect(() => {
     if (!isViewerMode) {
@@ -670,13 +690,41 @@ export default function App() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => {
-                    const query = e.target.value;
+                    const query = e.target.value.trim();
                     setSearchQuery(query);
-                    if (query) {
-                      const foundIndex = displayImages.findIndex(img => img.name.toLowerCase().includes(query.toLowerCase()));
-                      if (foundIndex !== -1 && foundIndex !== viewerIndex) {
-                        setViewerIndex(foundIndex);
+                    if (!query) return;
+
+                    const displayImages = images.length > 0 ? images : viewerImages;
+                    const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
+                    let foundIndex = -1;
+
+                    // 1. Try to find by Exact ID from annotations XML
+                    const isNumeric = /^\d+$/.test(query);
+                    if (isNumeric) {
+                      const foundKey = Object.keys(currentAnnotations.images).find(k => {
+                        const ann = currentAnnotations.images[k];
+                        return ann && ann.id !== null && ann.id.toString() === query;
+                      });
+
+                      if (foundKey) {
+                        // Found a filename in XML with this ID, now find its index in our current image list
+                        const cleanKey = foundKey.toLowerCase().split('/').pop();
+                        foundIndex = displayImages.findIndex(img => {
+                          const imgName = img.name.toLowerCase();
+                          return imgName === foundKey.toLowerCase() || imgName.endsWith(cleanKey);
+                        });
                       }
+                    }
+
+                    // 2. Fallback to simple name inclusion search if not found by ID
+                    if (foundIndex === -1) {
+                      foundIndex = displayImages.findIndex(img => 
+                        img.name.toLowerCase().includes(query.toLowerCase())
+                      );
+                    }
+
+                    if (foundIndex !== -1 && foundIndex !== viewerIndex) {
+                      setViewerIndex(foundIndex);
                     }
                   }}
                   onKeyDown={(e) => {
@@ -760,73 +808,12 @@ export default function App() {
         if (req !== 'granted') return
       }
 
-      if (handle.kind === 'directory') {
-        await readDirectoryHandle(handle)
-      } else if (handle.kind === 'file') {
-        await readZipHandle(handle)
-      }
+      await readZipHandle(handle)
     } catch (err) {
       console.error(err)
     }
   }
 
-  async function readDirectoryHandle(dirHandle) {
-    setIsLoading(true)
-    imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
-    setImages([])
-    setAnnotations({ labels: {}, images: {} })
-    const imageData = []
-    let annotationFile = null
-    try {
-      async function traverse(handle, currentPath = '') {
-        for await (const entry of handle.values()) {
-          if (entry.kind === 'file') {
-            if (entry.name.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
-              const file = await entry.getFile()
-              imageData.push({ file, name: currentPath + entry.name })
-            } else if (entry.name === 'annotations.xml') {
-              annotationFile = await entry.getFile()
-            }
-          } else if (entry.kind === 'directory') {
-            await traverse(entry, currentPath + entry.name + '/')
-          }
-        }
-      }
-      await traverse(dirHandle, dirHandle.name + '/')
-      
-      if (annotationFile) {
-        const text = await annotationFile.text()
-        const parsed = parseAnnotations(text)
-        setAnnotations(parsed)
-      }
-
-
-      imageData.sort((a, b) => a.name.localeCompare(b.name))
-      if (!imageData.length) return
-      const nextRecords = imageData.map((data, index) =>
-        createImageRecord(data.file, `${Date.now()}-${index}`, data.name)
-      )
-      startTransition(() => {
-        setImages(nextRecords)
-      })
-    } catch (err) {
-      console.error(err)
-    } finally {
-      setIsLoading(false)
-      setLoadDone(true)
-    }
-  }
-
-  async function openPicker() {
-    try {
-      const handle = await window.showDirectoryPicker({ id: 'image-folder', mode: 'read' })
-      await setFolderHandle(handle)
-      setHasSavedFolder(true)
-      await readDirectoryHandle(handle)
-    } catch (err) {
-      if (err.name !== 'AbortError') console.error(err)
-    }
-  }
 
   async function readZipHandle(fileHandle) {
     setIsLoading(true)
@@ -952,9 +939,6 @@ export default function App() {
       <main className="page">
         <section className="hero-panel">
           <div className="hero-actions">
-            <button type="button" className="primary-btn" onClick={openPicker}>
-              Chọn Folder
-            </button>
             <button type="button" className="primary-btn" onClick={openZipPicker}>
               Chọn file ZIP
             </button>
@@ -976,8 +960,8 @@ export default function App() {
               gap: '16px'
             }}>
               <div>
-                <strong style={{ display: 'block', color: 'white' }}>Phát hiện dữ liệu ảnh cũ (Folder/ZIP)!</strong>
-                <span style={{ fontSize: '0.9em', color: 'rgba(255,255,255,0.7)' }}>Bạn có muốn khôi phục lại dữ liệu này không? (Trình duyệt sẽ yêu cầu quyền đọc)</span>
+                <strong style={{ display: 'block', color: 'white' }}>Phát hiện dữ liệu ZIP cũ!</strong>
+                <span style={{ fontSize: '0.9em', color: 'rgba(255,255,255,0.7)' }}>Bạn có muốn khôi phục lại file ZIP này không? (Trình duyệt sẽ yêu cầu quyền đọc)</span>
               </div>
               <div style={{ display: 'flex', gap: '8px' }}>
                 <button type="button" className="primary-btn" onClick={reloadFolder}>
