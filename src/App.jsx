@@ -266,8 +266,12 @@ export default function App() {
 
   useEffect(() => {
     if (isViewerMode) {
-      const timer = setTimeout(() => setShowSearchTip(true), 1500)
-      const hideTimer = setTimeout(() => setShowSearchTip(false), 15000)
+      console.log("Viewer Mode Active - Setting up search tip timer");
+      const timer = setTimeout(() => {
+        console.log("Showing search tip toast");
+        setShowSearchTip(true);
+      }, 1000)
+      const hideTimer = setTimeout(() => setShowSearchTip(false), 20000)
       return () => {
         clearTimeout(timer)
         clearTimeout(hideTimer)
@@ -552,37 +556,45 @@ export default function App() {
           </div>
         )}
         {showSearchTip && (
-          <div className="search-tip-overlay" style={{
+          <div className="search-tip-toast" style={{
             position: 'fixed',
-            top: '80px',
-            right: '20px',
-            zIndex: 1001,
-            padding: '12px 20px',
-            background: 'rgba(74, 222, 128, 0.95)',
-            color: '#064e3b',
-            borderRadius: '12px',
-            boxShadow: '0 10px 25px rgba(0,0,0,0.3)',
+            bottom: '40px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 99999,
+            padding: '14px 24px',
+            background: '#22c55e', 
+            color: 'white',
+            borderRadius: '50px',
+            boxShadow: '0 15px 35px rgba(0,0,0,0.4)',
             display: 'flex',
             alignItems: 'center',
-            gap: '12px',
-            fontWeight: 600,
-            animation: 'slideIn 0.4s ease-out'
+            gap: '15px',
+            fontWeight: 'bold',
+            fontSize: '1.1rem',
+            border: '2px solid rgba(255,255,255,0.3)',
+            pointerEvents: 'auto'
           }}>
-            <span>💡 Mới: Nhập ID Frame để tìm kiếm</span>
+            <span style={{ fontSize: '1.3rem' }}>💡</span>
+            <span>Mới: Nhập ID Frame để tìm kiếm</span>
             <button 
               type="button" 
-              onClick={() => setShowSearchTip(false)}
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowSearchTip(false);
+              }}
               style={{
-                background: 'rgba(0,0,0,0.1)',
+                background: 'rgba(0,0,0,0.2)',
                 border: 'none',
                 borderRadius: '50%',
-                width: '24px',
-                height: '24px',
+                width: '28px',
+                height: '28px',
                 cursor: 'pointer',
+                color: 'white',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontSize: '14px'
+                marginLeft: '10px'
               }}
             >
               ✕
