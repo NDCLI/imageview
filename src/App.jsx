@@ -266,16 +266,10 @@ export default function App() {
 
   useEffect(() => {
     if (isViewerMode) {
-      console.log("Viewer Mode Active - Setting up search tip timer");
-      const timer = setTimeout(() => {
-        console.log("Showing search tip toast");
-        setShowSearchTip(true);
-      }, 1000)
-      const hideTimer = setTimeout(() => setShowSearchTip(false), 20000)
-      return () => {
-        clearTimeout(timer)
-        clearTimeout(hideTimer)
-      }
+      console.log("Viewer Mode Active - Search Banner Triggered");
+      setShowSearchTip(true);
+      const hideTimer = setTimeout(() => setShowSearchTip(false), 30000);
+      return () => clearTimeout(hideTimer);
     }
   }, [isViewerMode])
 
@@ -521,7 +515,48 @@ export default function App() {
     const activeImage = hasImages ? displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)] : null
 
     return (
-      <main className="viewer-shell">
+      <main className="viewer-shell" style={{ position: 'relative', overflow: 'hidden' }}>
+        {showSearchTip && (
+          <div className="search-banner" style={{
+            width: '100%',
+            background: 'linear-gradient(90deg, #f59e0b, #d97706)',
+            color: 'white',
+            padding: '10px 20px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            zIndex: 99999,
+            gap: '15px',
+            boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
+            fontWeight: 'bold',
+            fontSize: '1rem',
+          }}>
+            <span>💡 Mới: Tìm bằng id/frame KHI MỞ TRANG preview</span>
+            <button 
+              type="button" 
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowSearchTip(false);
+              }}
+              style={{
+                background: 'rgba(255,255,255,0.2)',
+                border: 'none',
+                borderRadius: '6px',
+                padding: '4px 12px',
+                cursor: 'pointer',
+                color: 'white',
+                fontSize: '0.9rem',
+                fontWeight: 'bold',
+                transition: 'all 0.2s'
+              }}
+            >
+              Đã hiểu
+            </button>
+          </div>
+        )}
         {showReloadPrompt && (
           <div className="reload-overlay" style={{
             position: 'fixed',
@@ -553,52 +588,6 @@ export default function App() {
                 Bỏ qua
               </button>
             </div>
-          </div>
-        )}
-        {showSearchTip && (
-          <div className="search-tip-toast" style={{
-            position: 'fixed',
-            bottom: '40px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 99999,
-            padding: '14px 24px',
-            background: '#22c55e', 
-            color: 'white',
-            borderRadius: '50px',
-            boxShadow: '0 15px 35px rgba(0,0,0,0.4)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '15px',
-            fontWeight: 'bold',
-            fontSize: '1.1rem',
-            border: '2px solid rgba(255,255,255,0.3)',
-            pointerEvents: 'auto'
-          }}>
-            <span style={{ fontSize: '1.3rem' }}>💡</span>
-            <span>Mới: Nhập ID Frame để tìm kiếm</span>
-            <button 
-              type="button" 
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowSearchTip(false);
-              }}
-              style={{
-                background: 'rgba(0,0,0,0.2)',
-                border: 'none',
-                borderRadius: '50%',
-                width: '28px',
-                height: '28px',
-                cursor: 'pointer',
-                color: 'white',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                marginLeft: '10px'
-              }}
-            >
-              ✕
-            </button>
           </div>
         )}
         <section className="viewer-panel">
