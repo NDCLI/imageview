@@ -164,6 +164,7 @@ export default function App() {
   const [hasSavedFolder, setHasSavedFolder] = useState(false)
   const [showReloadPrompt, setShowReloadPrompt] = useState(false)
   const [showBoxes, setShowBoxes] = useState(false)
+  const [showSearchTip, setShowSearchTip] = useState(false)
   const imagesRef = useRef([])
 
   const [visibleCount, setVisibleCount] = useState(50)
@@ -262,6 +263,17 @@ export default function App() {
       }
     }
   }, [isViewerMode, viewerImages, viewerIndex, images])
+
+  useEffect(() => {
+    if (isViewerMode && (images.length > 0 || viewerImages.length > 0)) {
+      const timer = setTimeout(() => setShowSearchTip(true), 1500)
+      const hideTimer = setTimeout(() => setShowSearchTip(false), 10000)
+      return () => {
+        clearTimeout(timer)
+        clearTimeout(hideTimer)
+      }
+    }
+  }, [isViewerMode])
 
 
 
@@ -537,6 +549,44 @@ export default function App() {
                 Bỏ qua
               </button>
             </div>
+          </div>
+        )}
+        {showSearchTip && (
+          <div className="search-tip-overlay" style={{
+            position: 'fixed',
+            top: '80px',
+            right: '20px',
+            zIndex: 1001,
+            padding: '12px 20px',
+            background: 'rgba(74, 222, 128, 0.95)',
+            color: '#064e3b',
+            borderRadius: '12px',
+            boxShadow: '0 10px 25px rgba(0,0,0,0.3)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            fontWeight: 600,
+            animation: 'slideIn 0.4s ease-out'
+          }}>
+            <span>💡 Mới: Nhập ID Frame để tìm kiếm</span>
+            <button 
+              type="button" 
+              onClick={() => setShowSearchTip(false)}
+              style={{
+                background: 'rgba(0,0,0,0.1)',
+                border: 'none',
+                borderRadius: '50%',
+                width: '24px',
+                height: '24px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '14px'
+              }}
+            >
+              ✕
+            </button>
           </div>
         )}
         <section className="viewer-panel">
