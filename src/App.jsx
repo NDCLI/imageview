@@ -1,11 +1,9 @@
 import { startTransition, useEffect, useRef, useState } from 'react'
-import * as fflate from 'fflate' // Still used for small things if needed, but primary extraction in worker
+import JSZip from 'jszip'
 import { getFolderHandle, setFolderHandle, clearFolderHandle } from './storage'
 
-// Worker initialization
-const zipWorker = new Worker(new URL('./zip.worker.js', import.meta.url), { type: 'module' });
-
 const PREVIEW_TAB_NAME = 'image-viewer-tab'
+
 const VIEWER_STATE_KEY = 'local-image-viewer-state'
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 100
@@ -14,42 +12,11 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max)
 }
 
-function getAnnotationData(imageName, allAnns) {
-  if (!allAnns || !allAnns.images || !imageName) return null;
-  
-  const images = allAnns.images;
-  const lowerName = imageName.toLowerCase();
-  const simpleName = imageName.split('/').pop().toLowerCase();
-  const cleanName = simpleName.replace(/\.[^/.]+$/, "");
-
-  // 1. Exact match
-  if (images[imageName]) return images[imageName];
-  
-  // 2. Case-insensitive exact match
-  const keys = Object.keys(images);
-  let foundKey = keys.find(k => k.toLowerCase() === lowerName);
-  if (foundKey) return images[foundKey];
-
-  // 3. Basename match
-  foundKey = keys.find(k => k.split('/').pop().toLowerCase() === simpleName);
-  if (foundKey) return images[foundKey];
-
-  // 4. Extenion-less match
-  foundKey = keys.find(k => {
-    const sk = k.split('/').pop().toLowerCase().replace(/\.[^/.]+$/, "");
-    return sk === cleanName;
-  });
-  if (foundKey) return images[foundKey];
-
-  return null;
-}
-
 function parseAnnotations(xmlText) {
   const parser = new DOMParser()
   const xmlDoc = parser.parseFromString(xmlText, 'text/xml')
   const labels = {}
   const images = {}
-  const byId = {}
 
   // Parse labels/colors
   const labelNodes = xmlDoc.querySelectorAll('label')
@@ -77,12 +44,10 @@ function parseAnnotations(xmlText) {
         ybr: parseFloat(box.getAttribute('ybr'))
       })
     })
-    const record = { id, width, height, boxes };
-    images[name] = record;
-    if (id) byId[id] = name;
+    images[name] = { id, width, height, boxes }
   })
 
-  return { labels, images, byId }
+  return { labels, images }
 }
 
 function getFitState(imageWidth, imageHeight, stage) {
@@ -269,14 +234,6 @@ export default function App() {
       if (event.key === VIEWER_STATE_KEY) {
         setViewerImages(readViewerImagesFromStorage())
       }
-      if (event.key === 'local-image-viewer-annotations') {
-        try {
-          const raw = localStorage.getItem('local-image-viewer-annotations')
-          if (raw) setViewerAnnotations(JSON.parse(raw))
-        } catch (err) {
-          console.error('Lỗi đồng bộ annotations:', err)
-        }
-      }
     }
 
     window.addEventListener('storage', handleStorage)
@@ -303,9 +260,6 @@ export default function App() {
         setSearchQuery(displayImages[safeIndex].name)
       }
     }
-    
-    // Reset zoom when switching images to fix resolution displacement
-    resetViewerZoom();
   }, [isViewerMode, viewerImages, viewerIndex, images])
 
 
@@ -610,8 +564,29 @@ export default function App() {
                       className="viewer-annotations"
                       viewBox={(() => {
                         const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                        const annotationData = getAnnotationData(activeImage.name, currentAnnotations);
+                        const activeName = activeImage.name.toLowerCase();
+                        const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
+                        const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
                         
+                        const foundKey = Object.keys(currentAnnotations.images).find(k => {
+                          const kn = k.toLowerCase();
+                          if (kn === activeName || kn === simpleActiveName) return true;
+                          const skn = k.split('/').pop().toLowerCase();
+                          if (skn === simpleActiveName) return true;
+                          const ckn = skn.replace(/\.[^/.]+$/, "");
+                          if (ckn === cleanActiveName) return true;
+                          
+                          const ann = currentAnnotations.images[k];
+                          if (ann && ann.id !== null) {
+                             const idStr = ann.id.toString();
+                             if (cleanActiveName === idStr) return true;
+                             const nameNum = cleanActiveName.match(/\d+$/)?.[0];
+                             if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
+                          }
+                          return false;
+                        });
+                        
+                        const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
                         if (annotationData && annotationData.width && annotationData.height) {
                           return `0 0 ${annotationData.width} ${annotationData.height}`;
                         }
@@ -628,7 +603,29 @@ export default function App() {
                     >
                       {(() => {
                         const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                        const annotationData = getAnnotationData(activeImage.name, currentAnnotations);
+                        const activeName = activeImage.name.toLowerCase();
+                        const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
+                        const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
+                        
+                        const foundKey = Object.keys(currentAnnotations.images).find(k => {
+                          const kn = k.toLowerCase();
+                          if (kn === activeName || kn === simpleActiveName) return true;
+                          const skn = k.split('/').pop().toLowerCase();
+                          if (skn === simpleActiveName) return true;
+                          const ckn = skn.replace(/\.[^/.]+$/, "");
+                          if (ckn === cleanActiveName) return true;
+                          
+                          const ann = currentAnnotations.images[k];
+                          if (ann && ann.id !== null) {
+                             const idStr = ann.id.toString();
+                             if (cleanActiveName === idStr) return true;
+                             const nameNum = cleanActiveName.match(/\d+$/)?.[0];
+                             if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
+                          }
+                          return false;
+                        });
+                        
+                        const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
                         const boxes = annotationData?.boxes || [];
 
                         return boxes.map((box, i) => {
@@ -673,31 +670,10 @@ export default function App() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => {
-                    const query = e.target.value.trim().toLowerCase();
-                    setSearchQuery(e.target.value); // keep original in input
+                    const query = e.target.value;
+                    setSearchQuery(query);
                     if (query) {
-                      const currentAnns = images.length > 0 ? annotations : viewerAnnotations;
-                      
-                      // 1. Exact ID match via byId map (highest priority)
-                      const targetNameById = currentAnns.byId?.[query];
-                      if (targetNameById) {
-                        const targetSimple = targetNameById.split('/').pop().toLowerCase();
-                        const idIndex = displayImages.findIndex(img => {
-                          const imgSimple = img.name.split('/').pop().toLowerCase();
-                          return imgSimple === targetSimple || imgSimple.replace(/\.[^/.]+$/, "") === targetSimple.replace(/\.[^/.]+$/, "");
-                        });
-                        
-                        if (idIndex !== -1 && idIndex !== viewerIndex) {
-                          setViewerIndex(idIndex);
-                          return;
-                        }
-                      }
-
-                      // 2. Fallback: Name substring matching
-                      const foundIndex = displayImages.findIndex(img =>
-                        img.name.toLowerCase().includes(query)
-                      );
-                      
+                      const foundIndex = displayImages.findIndex(img => img.name.toLowerCase().includes(query.toLowerCase()));
                       if (foundIndex !== -1 && foundIndex !== viewerIndex) {
                         setViewerIndex(foundIndex);
                       }
@@ -720,8 +696,8 @@ export default function App() {
                     fontFamily: 'inherit',
                     fontSize: 'inherit'
                   }}
-                  placeholder="Dán hoặc nhập tên ảnh/Frame ID để tìm..."
-                  title="Tìm kiếm tên ảnh hoặc Frame ID"
+                  placeholder="Dán hoặc nhập tên ảnh để tìm..."
+                  title="Tìm kiếm tên ảnh"
                 />
                 <button
                   className={`box-toggle-btn ${showBoxes ? 'active' : ''}`}
@@ -735,7 +711,26 @@ export default function App() {
                   <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
                   {(() => {
                     const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                    const annotationData = getAnnotationData(activeImage.name, currentAnnotations);
+                    const activeName = activeImage.name.toLowerCase();
+                    const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
+                    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
+                    const foundKey = Object.keys(currentAnnotations.images).find(k => {
+                      const kn = k.toLowerCase();
+                      if (kn === activeName || kn === simpleActiveName) return true;
+                      const skn = k.split('/').pop().toLowerCase();
+                      if (skn === simpleActiveName) return true;
+                      const ckn = skn.replace(/\.[^/.]+$/, "");
+                      if (ckn === cleanActiveName) return true;
+                      const ann = currentAnnotations.images[k];
+                      if (ann && ann.id !== null) {
+                         const idStr = ann.id.toString();
+                         if (cleanActiveName === idStr) return true;
+                         const nameNum = cleanActiveName.match(/\d+$/)?.[0];
+                         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
+                      }
+                      return false;
+                    });
+                    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
                     return annotationData ? `ID: ${annotationData.id}` : 'No ID';
                   })()}
                   <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
@@ -746,7 +741,7 @@ export default function App() {
           ) : (
             <div className="empty-gallery">
               <h3>Tab preview chưa có dữ liệu ảnh</h3>
-              <p>Quay lại tab chính và nạp file ZIP để xem ảnh.</p>
+              <p>Quay lại tab chính và bấm vào một ảnh để nạp danh sách vào đây.</p>
             </div>
           )}
         </section>
@@ -765,11 +760,71 @@ export default function App() {
         if (req !== 'granted') return
       }
 
-      if (handle.kind === 'file') {
+      if (handle.kind === 'directory') {
+        await readDirectoryHandle(handle)
+      } else if (handle.kind === 'file') {
         await readZipHandle(handle)
       }
     } catch (err) {
       console.error(err)
+    }
+  }
+
+  async function readDirectoryHandle(dirHandle) {
+    setIsLoading(true)
+    imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
+    setImages([])
+    setAnnotations({ labels: {}, images: {} })
+    const imageData = []
+    let annotationFile = null
+    try {
+      async function traverse(handle, currentPath = '') {
+        for await (const entry of handle.values()) {
+          if (entry.kind === 'file') {
+            if (entry.name.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+              const file = await entry.getFile()
+              imageData.push({ file, name: currentPath + entry.name })
+            } else if (entry.name === 'annotations.xml') {
+              annotationFile = await entry.getFile()
+            }
+          } else if (entry.kind === 'directory') {
+            await traverse(entry, currentPath + entry.name + '/')
+          }
+        }
+      }
+      await traverse(dirHandle, dirHandle.name + '/')
+      
+      if (annotationFile) {
+        const text = await annotationFile.text()
+        const parsed = parseAnnotations(text)
+        setAnnotations(parsed)
+      }
+
+
+      imageData.sort((a, b) => a.name.localeCompare(b.name))
+      if (!imageData.length) return
+      const nextRecords = imageData.map((data, index) =>
+        createImageRecord(data.file, `${Date.now()}-${index}`, data.name)
+      )
+      startTransition(() => {
+        setImages(nextRecords)
+      })
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setIsLoading(false)
+      setLoadDone(true)
+    }
+  }
+
+  async function openPicker() {
+    try {
+      const handle = await window.showDirectoryPicker({ id: 'image-folder', mode: 'read' })
+      await setFolderHandle(handle)
+      setHasSavedFolder(true)
+      await readDirectoryHandle(handle)
+    } catch (err) {
+      if (err.name !== 'AbortError') console.error(err)
     }
   }
 
@@ -778,41 +833,43 @@ export default function App() {
     imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     setImages([])
     setAnnotations({ labels: {}, images: {} })
-    
     try {
       const zipFile = await fileHandle.getFile()
-      
-      // Use Web Worker for extraction
-      zipWorker.onmessage = (e) => {
-        const { files, annotationsXml, error } = e.data;
-        if (error) {
-          console.error('Worker error:', error);
-          setIsLoading(false);
-          return;
+      const zip = new JSZip()
+      const zipContent = await zip.loadAsync(zipFile)
+
+      const imageData = []
+      let annFileContent = null
+
+      for (const [path, zipEntry] of Object.entries(zipContent.files)) {
+        if (zipEntry.dir) continue
+        if (path.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
+          const blob = await zipEntry.async('blob')
+          const imageFile = new File([blob], path, { type: blob.type || 'image/*' })
+          imageData.push({ file: imageFile, name: path })
+        } else if (path.endsWith('annotations.xml')) {
+          annFileContent = await zipEntry.async('text')
         }
+      }
 
-        if (annotationsXml) {
-          const parsed = parseAnnotations(annotationsXml)
-          setAnnotations(parsed)
-        }
+      if (annFileContent) {
+        const parsed = parseAnnotations(annFileContent)
+        setAnnotations(parsed)
+      }
 
-        const sortedFiles = files.sort((a, b) => a.name.localeCompare(b.name));
-        const nextRecords = sortedFiles.map((f, index) => 
-          createImageRecord(f.blob, `${Date.now()}-${index}`, f.name)
-        );
+      imageData.sort((a, b) => a.name.localeCompare(b.name))
 
-        startTransition(() => {
-          setImages(nextRecords)
-          setIsLoading(false)
-          setLoadDone(true)
-        })
-      };
-
-      zipWorker.postMessage({ file: zipFile });
-
+      const nextRecords = imageData.map((data, index) =>
+        createImageRecord(data.file, `${Date.now()}-${index}`, data.name)
+      )
+      startTransition(() => {
+        setImages(nextRecords)
+      })
     } catch (err) {
-      console.error('Lỗi khi tải zip:', err)
+      console.error('Lỗi khi tải lại zip:', err)
+    } finally {
       setIsLoading(false)
+      setLoadDone(true)
     }
   }
 
@@ -842,6 +899,17 @@ export default function App() {
     setShowReloadPrompt(false)
     await clearFolderHandle()
     setHasSavedFolder(false)
+  }
+
+  function removeImage(imageId) {
+    setImages((current) => {
+      const imageToRemove = current.find((image) => image.id === imageId)
+      if (imageToRemove) {
+        URL.revokeObjectURL(imageToRemove.url)
+      }
+
+      return current.filter((image) => image.id !== imageId)
+    })
   }
 
   function handleThumbnailLoad(imageId, event) {
@@ -884,6 +952,9 @@ export default function App() {
       <main className="page">
         <section className="hero-panel">
           <div className="hero-actions">
+            <button type="button" className="primary-btn" onClick={openPicker}>
+              Chọn Folder
+            </button>
             <button type="button" className="primary-btn" onClick={openZipPicker}>
               Chọn file ZIP
             </button>
@@ -905,7 +976,7 @@ export default function App() {
               gap: '16px'
             }}>
               <div>
-                <strong style={{ display: 'block', color: 'white' }}>Phát hiện dữ liệu ZIP cũ!</strong>
+                <strong style={{ display: 'block', color: 'white' }}>Phát hiện dữ liệu ảnh cũ (Folder/ZIP)!</strong>
                 <span style={{ fontSize: '0.9em', color: 'rgba(255,255,255,0.7)' }}>Bạn có muốn khôi phục lại dữ liệu này không? (Trình duyệt sẽ yêu cầu quyền đọc)</span>
               </div>
               <div style={{ display: 'flex', gap: '8px' }}>
