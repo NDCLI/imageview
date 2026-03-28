@@ -167,6 +167,21 @@ export default function App() {
   const [showSearchTip, setShowSearchTip] = useState(false)
   const imagesRef = useRef([])
 
+  useEffect(() => {
+    // Cache busting: Force reload if a new build is detected
+    const currentBuild = typeof __BUILD_DATE__ !== 'undefined' ? __BUILD_DATE__ : null;
+    if (currentBuild) {
+      const lastBuild = localStorage.getItem('last_build_date');
+      if (lastBuild && lastBuild !== String(currentBuild)) {
+        console.log("New build detected! Reloading to clear cache...");
+        localStorage.setItem('last_build_date', String(currentBuild));
+        window.location.reload(true);
+      } else {
+        localStorage.setItem('last_build_date', String(currentBuild));
+      }
+    }
+  }, []);
+
   const [visibleCount, setVisibleCount] = useState(50)
 
   useEffect(() => {
