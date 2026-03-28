@@ -265,9 +265,9 @@ export default function App() {
   }, [isViewerMode, viewerImages, viewerIndex, images])
 
   useEffect(() => {
-    if (isViewerMode && (images.length > 0 || viewerImages.length > 0)) {
+    if (isViewerMode) {
       const timer = setTimeout(() => setShowSearchTip(true), 1500)
-      const hideTimer = setTimeout(() => setShowSearchTip(false), 10000)
+      const hideTimer = setTimeout(() => setShowSearchTip(false), 15000)
       return () => {
         clearTimeout(timer)
         clearTimeout(hideTimer)
