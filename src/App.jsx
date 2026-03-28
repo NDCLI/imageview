@@ -268,7 +268,7 @@ export default function App() {
     if (isViewerMode) {
       console.log("Viewer Mode Active - Search Banner Triggered");
       setShowSearchTip(true);
-      const hideTimer = setTimeout(() => setShowSearchTip(false), 30000);
+      const hideTimer = setTimeout(() => setShowSearchTip(false), 10000);
       return () => clearTimeout(hideTimer);
     }
   }, [isViewerMode])
@@ -534,7 +534,7 @@ export default function App() {
             fontWeight: 'bold',
             fontSize: '1rem',
           }}>
-            <span>💡 Mới: Tìm bằng id/frame KHI MỞ TRANG preview</span>
+            <span>💡Tìm bằng id/frame</span>
             <button 
               type="button" 
               onClick={(e) => {
