@@ -6,7 +6,7 @@ export default defineConfig({
   define: {
     __BUILD_DATE__: Date.now(),
   },
-  base: '/imageview/',
+  base: process.env.VERCEL ? '/' : '/imageview/',
   optimizeDeps: {
     include: ['fflate']
   },
