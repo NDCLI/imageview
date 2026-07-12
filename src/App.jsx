@@ -142,6 +142,49 @@ export default function App() {
   const imagesRef = useRef([])
   const [zipEntries, setZipEntries] = useState(null)
   const [extractedUrls, setExtractedUrls] = useState({})
+  const channelRef = useRef(null)
+  const requestedImagesRef = useRef(new Set())
+
+  // BroadcastChannel for cross-tab communication (Main <-> Viewer)
+  useEffect(() => {
+    channelRef.current = new BroadcastChannel('image-view-channel')
+    
+    if (!isViewerMode) {
+      // Main tab: listen for requests and send blobs
+      channelRef.current.onmessage = async (e) => {
+        if (e.data.type === 'REQ_IMG' && zipEntries) {
+          const entry = zipEntries[e.data.name];
+          if (entry) {
+            try {
+              const blob = await entry.blob();
+              channelRef.current.postMessage({ type: 'RES_IMG', idx: e.data.idx, blob });
+            } catch (err) {
+              console.error('Lỗi khi đọc blob qua channel:', err);
+            }
+          }
+        }
+      }
+    } else {
+      // Viewer tab: receive blobs
+      channelRef.current.onmessage = (e) => {
+        if (e.data.type === 'RES_IMG') {
+          const url = URL.createObjectURL(e.data.blob);
+          setExtractedUrls(prev => {
+            if (prev[e.data.idx]) URL.revokeObjectURL(prev[e.data.idx]);
+            return { ...prev, [e.data.idx]: url };
+          });
+          // Hide reload prompt since we got data from main tab
+          setShowReloadPrompt(false);
+        }
+      }
+    }
+
+    return () => {
+      if (channelRef.current) {
+        channelRef.current.close();
+      }
+    }
+  }, [isViewerMode, zipEntries])
 
   useEffect(() => {
     // Cache busting: Force reload if a new build is detected
@@ -222,7 +265,7 @@ export default function App() {
 
   // Sliding window pre-fetching effect for viewer mode
   useEffect(() => {
-    if (!zipEntries) return;
+    // Both Main and Viewer run this, but Viewer relies on Channel if no zipEntries
     const displayImages = images.length > 0 ? images : viewerImages;
     if (displayImages.length === 0) return;
 
@@ -244,54 +287,49 @@ export default function App() {
         if (!neighborRange.has(idx)) {
           URL.revokeObjectURL(nextUrls[idx]);
           delete nextUrls[idx];
+          requestedImagesRef.current.delete(idx);
           changed = true;
         }
       });
       return changed ? nextUrls : prev;
     });
 
-    // 1. Fetch active image IMMEDIATELY for instant loading
-    const activeImgRecord = displayImages[activeIdx];
-    if (activeImgRecord && !extractedUrls[activeIdx]) {
-      const entry = zipEntries[activeImgRecord.name];
-      if (entry) {
-        entry.blob().then(blob => {
-          const url = URL.createObjectURL(blob);
-          setExtractedUrls(current => {
-            if (!current[activeIdx]) {
-              return { ...current, [activeIdx]: url };
-            } else {
-              URL.revokeObjectURL(url);
-              return current;
-            }
+    const fetchImage = (idx) => {
+      if (requestedImagesRef.current.has(idx) || extractedUrls[idx]) return;
+      const imgRecord = displayImages[idx];
+      if (!imgRecord) return;
+
+      if (zipEntries) {
+        // Direct local read
+        const entry = zipEntries[imgRecord.name];
+        if (entry) {
+          requestedImagesRef.current.add(idx);
+          entry.blob().then(blob => {
+            const url = URL.createObjectURL(blob);
+            setExtractedUrls(current => {
+              if (neighborRange.has(idx) && !current[idx]) {
+                return { ...current, [idx]: url };
+              } else {
+                URL.revokeObjectURL(url);
+                return current;
+              }
+            });
           });
-        });
+        }
+      } else if (isViewerMode && channelRef.current) {
+        // Request from main tab via channel
+        requestedImagesRef.current.add(idx);
+        channelRef.current.postMessage({ type: 'REQ_IMG', idx, name: imgRecord.name });
       }
-    }
+    };
+
+    // 1. Fetch active image IMMEDIATELY for instant loading
+    fetchImage(activeIdx);
 
     // 2. Debounce pre-fetching of neighboring images (150ms) to avoid lag when holding Next button
     const timer = setTimeout(() => {
-      setExtractedUrls(prev => {
-        neighborRange.forEach(idx => {
-          if (idx !== activeIdx && !prev[idx]) {
-            const imgRecord = displayImages[idx];
-            const entry = zipEntries[imgRecord.name];
-            if (entry) {
-              entry.blob().then(blob => {
-                const url = URL.createObjectURL(blob);
-                setExtractedUrls(current => {
-                  if (neighborRange.has(idx) && !current[idx]) {
-                    return { ...current, [idx]: url };
-                  } else {
-                    URL.revokeObjectURL(url);
-                    return current;
-                  }
-                });
-              });
-            }
-          }
-        });
-        return prev;
+      neighborRange.forEach(idx => {
+        if (idx !== activeIdx) fetchImage(idx);
       });
     }, 150);
 
