@@ -1036,14 +1036,18 @@ export default function App() {
             <span>ImageView</span>
           </div>
 
-          {/* Center: action buttons */}
+          {/* Center: action buttons - only show what's needed */}
           <div className="hero-actions" style={{ margin: 0 }}>
-            <button type="button" className="primary-btn" onClick={openZipPicker} style={{ padding: '0.5rem 1.2rem', fontSize: '0.85rem' }}>
-              ＋ Chọn file ZIP
-            </button>
-            <button type="button" className="ghost-btn" onClick={clearImages} disabled={!images.length && !hasSavedFolder} style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}>
-              Xóa tất cả
-            </button>
+            {!images.length && (
+              <button type="button" className="primary-btn" onClick={openZipPicker} style={{ padding: '0.5rem 1.2rem', fontSize: '0.85rem' }}>
+                ＋ Chọn file ZIP
+              </button>
+            )}
+            {(images.length > 0 || hasSavedFolder) && (
+              <button type="button" className="ghost-btn" onClick={clearImages} style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}>
+                Xóa tất cả
+              </button>
+            )}
           </div>
 
           {/* Right: stats */}
