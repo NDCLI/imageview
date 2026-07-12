@@ -1036,13 +1036,11 @@ export default function App() {
             <span>ImageView</span>
           </div>
 
-          {/* Center: action buttons - only show what's needed */}
+          {/* Navbar actions: always visible, Xóa only when file loaded */}
           <div className="hero-actions" style={{ margin: 0 }}>
-            {!images.length && (
-              <button type="button" className="primary-btn" onClick={openZipPicker} style={{ padding: '0.5rem 1.2rem', fontSize: '0.85rem' }}>
-                ＋ Chọn file ZIP
-              </button>
-            )}
+            <button type="button" className="primary-btn" onClick={openZipPicker} style={{ padding: '0.5rem 1.2rem', fontSize: '0.85rem' }}>
+              ＋ Chọn file ZIP
+            </button>
             {(images.length > 0 || hasSavedFolder) && (
               <button type="button" className="ghost-btn" onClick={clearImages} style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}>
                 Xóa tất cả
@@ -1103,10 +1101,7 @@ export default function App() {
             <div className="dash-empty">
               <div className="dash-empty-icon">📦</div>
               <h3>Chưa có file nào được mở</h3>
-              <p>Chọn một file ZIP chứa ảnh để bắt đầu xem trước</p>
-              <button type="button" className="primary-btn dash-cta-btn" onClick={openZipPicker}>
-                ＋ Chọn file ZIP
-              </button>
+              <p>Nhấn <strong>＋ Chọn file ZIP</strong> ở trên để bắt đầu</p>
             </div>
           ) : (
             <div className="dashboard">
