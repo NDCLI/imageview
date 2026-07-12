@@ -1,5 +1,5 @@
 import { startTransition, useEffect, useRef, useState } from 'react'
-import JSZip from 'jszip'
+import { unzip } from 'unzipit'
 import { getFolderHandle, setFolderHandle, clearFolderHandle } from './storage'
 
 const PREVIEW_TAB_NAME = 'image-viewer-tab'
@@ -96,31 +96,6 @@ function writeViewerIndexToUrl(index) {
   window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`)
 }
 
-function createImageRecord(file, indexSeed, overrideName = null) {
-  const url = URL.createObjectURL(file)
-  const displayName = overrideName || file.name
-
-  const record = {
-    id: `${displayName}-${file.lastModified}-${indexSeed}`,
-    file,
-    url,
-    name: displayName,
-    size: file.size,
-    type: file.type || 'image/*',
-    width: 0,
-    height: 0,
-  }
-
-  // Pre-load dimensions to avoid layout shift
-  const img = new Image()
-  img.onload = () => {
-    record.width = img.naturalWidth
-    record.height = img.naturalHeight
-  }
-  img.src = url
-
-  return record
-}
 
 export default function App() {
   // Viewer mode with free panning and zoom at cursor
@@ -164,8 +139,9 @@ export default function App() {
   const [hasSavedFolder, setHasSavedFolder] = useState(false)
   const [showReloadPrompt, setShowReloadPrompt] = useState(false)
   const [showBoxes, setShowBoxes] = useState(false)
-  const [showSearchTip, setShowSearchTip] = useState(false)
   const imagesRef = useRef([])
+  const [zipEntries, setZipEntries] = useState(null)
+  const [extractedUrls, setExtractedUrls] = useState({})
 
   useEffect(() => {
     // Cache busting: Force reload if a new build is detected
@@ -185,12 +161,43 @@ export default function App() {
   const [visibleCount, setVisibleCount] = useState(50)
 
   useEffect(() => {
-    getFolderHandle().then(handle => {
+    getFolderHandle().then(async (handle) => {
       if (handle) {
         setHasSavedFolder(true)
-        // Hiển thị thông báo nếu chưa có ảnh nào được nạp (persistence qua restart)
-        if (!isViewerMode && imagesRef.current.length === 0) {
-          setShowReloadPrompt(true)
+        if (isViewerMode) {
+          try {
+            const perm = await handle.queryPermission({ mode: 'read' })
+            if (perm !== 'granted') {
+              setShowReloadPrompt(true)
+              return
+            }
+            const zipFile = await handle.getFile()
+            const { entries } = await unzip(zipFile)
+            setZipEntries(entries)
+            
+            // Extract annotations if present in viewer mode
+            let annFileContent = null
+            for (const [path, entry] of Object.entries(entries)) {
+              if (path.endsWith('annotations.xml')) {
+                annFileContent = await entry.text()
+                break
+              }
+            }
+            if (annFileContent) {
+              const parsed = parseAnnotations(annFileContent)
+              setViewerAnnotations(parsed)
+            }
+            // Trigger state change to fetch active images
+            setImages([]) 
+          } catch (e) {
+            console.error('Lỗi khi nạp zip trong viewer:', e)
+            setShowReloadPrompt(true)
+          }
+        } else {
+          // Hiển thị thông báo nếu chưa có ảnh nào được nạp ở tab chính (persistence qua restart)
+          if (imagesRef.current.length === 0) {
+            setShowReloadPrompt(true)
+          }
         }
       }
     }).catch(() => { })
@@ -206,41 +213,90 @@ export default function App() {
 
   useEffect(() => {
     return () => {
-      imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
+      setExtractedUrls(current => {
+        Object.values(current).forEach(url => URL.revokeObjectURL(url));
+        return {};
+      });
     }
   }, [])
 
+  // Sliding window pre-fetching effect for viewer mode
   useEffect(() => {
-    if (!isViewerMode || viewerImages.length === 0) return
+    if (!zipEntries) return;
+    const displayImages = images.length > 0 ? images : viewerImages;
+    if (displayImages.length === 0) return;
 
-    // Poll the blob URL to see if the main tab is still alive
-    const testUrl = viewerImages[0].url
-    
-    // We do a quick fetch check every 2 seconds
-    const intervalId = setInterval(() => {
-      fetch(testUrl)
-        .then(res => {
-          if (!res.ok) {
-            setShowReloadPrompt(true)
-            clearInterval(intervalId)
-          } else {
-            setShowReloadPrompt(false)
+    const activeIdx = viewerIndex;
+    const neighborRange = new Set();
+    for (let offset = -2; offset <= 2; offset++) {
+      const idx = viewerIndex + offset;
+      if (idx >= 0 && idx < displayImages.length) {
+        neighborRange.add(idx);
+      }
+    }
+
+    // Clean up URLs out of neighbor range IMMEDIATELY to free RAM
+    setExtractedUrls(prev => {
+      const nextUrls = { ...prev };
+      let changed = false;
+      Object.keys(nextUrls).forEach(idxStr => {
+        const idx = parseInt(idxStr, 10);
+        if (!neighborRange.has(idx)) {
+          URL.revokeObjectURL(nextUrls[idx]);
+          delete nextUrls[idx];
+          changed = true;
+        }
+      });
+      return changed ? nextUrls : prev;
+    });
+
+    // 1. Fetch active image IMMEDIATELY for instant loading
+    const activeImgRecord = displayImages[activeIdx];
+    if (activeImgRecord && !extractedUrls[activeIdx]) {
+      const entry = zipEntries[activeImgRecord.name];
+      if (entry) {
+        entry.blob().then(blob => {
+          const url = URL.createObjectURL(blob);
+          setExtractedUrls(current => {
+            if (!current[activeIdx]) {
+              return { ...current, [activeIdx]: url };
+            } else {
+              URL.revokeObjectURL(url);
+              return current;
+            }
+          });
+        });
+      }
+    }
+
+    // 2. Debounce pre-fetching of neighboring images (150ms) to avoid lag when holding Next button
+    const timer = setTimeout(() => {
+      setExtractedUrls(prev => {
+        neighborRange.forEach(idx => {
+          if (idx !== activeIdx && !prev[idx]) {
+            const imgRecord = displayImages[idx];
+            const entry = zipEntries[imgRecord.name];
+            if (entry) {
+              entry.blob().then(blob => {
+                const url = URL.createObjectURL(blob);
+                setExtractedUrls(current => {
+                  if (neighborRange.has(idx) && !current[idx]) {
+                    return { ...current, [idx]: url };
+                  } else {
+                    URL.revokeObjectURL(url);
+                    return current;
+                  }
+                });
+              });
+            }
           }
-        })
-        .catch(() => {
-          setShowReloadPrompt(true)
-          clearInterval(intervalId)
-        })
-    }, 2000)
+        });
+        return prev;
+      });
+    }, 150);
 
-    // Run once immediately on mount
-    fetch(testUrl).then(res => {
-      if (!res.ok) setShowReloadPrompt(true)
-      else setShowReloadPrompt(false)
-    }).catch(() => setShowReloadPrompt(true))
-
-    return () => clearInterval(intervalId)
-  }, [isViewerMode, viewerImages])
+    return () => clearTimeout(timer);
+  }, [viewerIndex, images, viewerImages, zipEntries, extractedUrls]);
 
   useEffect(() => {
     if (!isViewerMode) {
@@ -279,14 +335,6 @@ export default function App() {
     }
   }, [isViewerMode, viewerImages, viewerIndex, images])
 
-  useEffect(() => {
-    if (isViewerMode) {
-      console.log("Viewer Mode Active - Search Banner Triggered");
-      setShowSearchTip(true);
-      const hideTimer = setTimeout(() => setShowSearchTip(false), 10000);
-      return () => clearTimeout(hideTimer);
-    }
-  }, [isViewerMode])
 
 
 
@@ -396,18 +444,17 @@ export default function App() {
   useEffect(() => {
     if (!isViewerMode) return
 
+    const displayImages = images.length > 0 ? images : viewerImages
+    const activeImage = displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)]
+
     const currentScale = viewerTxRef.current.scale
     const isAtFitScale = Math.abs(currentScale - lastFitScaleRef.current) < 0.01
 
     if (isAtFitScale) {
       // If we were at fit scale on the previous image, reset to fit on the new image
       resetViewerZoom()
-    } else {
-      // If we are zoomed in/out, maintain current transformation
-      // but we might want to ensure the new image's dimensions are reflected if they changed
-      // (This is primarily handled by the container's width/height in render)
     }
-  }, [viewerIndex])
+  }, [viewerIndex, images, viewerImages])
 
   useEffect(() => {
     if (!isViewerMode) {
@@ -472,7 +519,6 @@ export default function App() {
         event.preventDefault()
         if (searchInputRef.current) {
           searchInputRef.current.focus()
-          searchInputRef.current.select()
         }
         return
       }
@@ -531,47 +577,7 @@ export default function App() {
 
     return (
       <main className="viewer-shell" style={{ position: 'relative', overflow: 'hidden' }}>
-        {showSearchTip && (
-          <div className="search-banner" style={{
-            width: '100%',
-            background: 'linear-gradient(90deg, #f59e0b, #d97706)',
-            color: 'white',
-            padding: '10px 20px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            zIndex: 99999,
-            gap: '15px',
-            boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
-            fontWeight: 'bold',
-            fontSize: '1rem',
-          }}>
-            <span>💡Tìm bằng id/frame</span>
-            <button 
-              type="button" 
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowSearchTip(false);
-              }}
-              style={{
-                background: 'rgba(255,255,255,0.2)',
-                border: 'none',
-                borderRadius: '6px',
-                padding: '4px 12px',
-                cursor: 'pointer',
-                color: 'white',
-                fontSize: '0.9rem',
-                fontWeight: 'bold',
-                transition: 'all 0.2s'
-              }}
-            >
-              Đã hiểu
-            </button>
-          </div>
-        )}
+
         {showReloadPrompt && (
           <div className="reload-overlay" style={{
             position: 'fixed',
@@ -630,21 +636,23 @@ export default function App() {
                     height: activeImage.height ? `${activeImage.height}px` : 'auto',
                   }}
                 >
-                  <img
-                    src={activeImage.url}
-                    alt={activeImage.name}
-                    onLoad={handleViewerImageLoad}
-                    className="viewer-image"
-                    style={{
-                      display: 'block',
-                      width: '100%',
-                      height: '100%',
-                    }}
-                    onError={() => {
-                      // Mất file (Blob URL hỏng do tab chính bị đóng)
-                      setShowReloadPrompt(true)
-                    }}
-                  />
+                  {extractedUrls[viewerIndex] ? (
+                    <img
+                      src={extractedUrls[viewerIndex]}
+                      alt={activeImage.name}
+                      onLoad={handleViewerImageLoad}
+                      className="viewer-image"
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        height: '100%',
+                      }}
+                    />
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', minHeight: '300px' }}>
+                      <span className="loading-spinner" />
+                    </div>
+                  )}
                   {showBoxes && (
                     <svg
                       className="viewer-annotations"
@@ -798,7 +806,13 @@ export default function App() {
                       e.target.blur()
                     }
                   }}
-                  onFocus={(e) => e.target.select()}
+                  onFocus={() => setSearchQuery('')}
+                  onBlur={() => {
+                    const displayImages = images.length > 0 ? images : viewerImages
+                    if (displayImages[viewerIndex]) {
+                      setSearchQuery(displayImages[viewerIndex].name)
+                    }
+                  }}
                   style={{
                     background: 'rgba(0, 0, 0, 0.5)',
                     border: '1px solid rgba(255, 255, 255, 0.2)',
@@ -883,38 +897,46 @@ export default function App() {
 
   async function readZipHandle(fileHandle) {
     setIsLoading(true)
-    imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
+    setExtractedUrls(current => {
+      Object.values(current).forEach(url => URL.revokeObjectURL(url));
+      return {};
+    });
     setImages([])
     setAnnotations({ labels: {}, images: {} })
     try {
       const zipFile = await fileHandle.getFile()
-      const zip = new JSZip()
-      const zipContent = await zip.loadAsync(zipFile)
+      const { entries } = await unzip(zipFile)
+      setZipEntries(entries)
 
       const imageData = []
       let annFileContent = null
 
-      for (const [path, zipEntry] of Object.entries(zipContent.files)) {
-        if (zipEntry.dir) continue
+      for (const [path, entry] of Object.entries(entries)) {
         if (path.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i)) {
-          const blob = await zipEntry.async('blob')
-          const imageFile = new File([blob], path, { type: blob.type || 'image/*' })
-          imageData.push({ file: imageFile, name: path })
+          imageData.push({ name: path, entry })
         } else if (path.endsWith('annotations.xml')) {
-          annFileContent = await zipEntry.async('text')
+          annFileContent = await entry.text()
         }
       }
 
+      let parsedAnnotations = { labels: {}, images: {} };
       if (annFileContent) {
-        const parsed = parseAnnotations(annFileContent)
-        setAnnotations(parsed)
+        parsedAnnotations = parseAnnotations(annFileContent)
+        setAnnotations(parsedAnnotations)
       }
 
       imageData.sort((a, b) => a.name.localeCompare(b.name))
 
-      const nextRecords = imageData.map((data, index) =>
-        createImageRecord(data.file, `${Date.now()}-${index}`, data.name)
-      )
+      const nextRecords = imageData.map((data, index) => {
+        const ann = parsedAnnotations.images[data.name] || parsedAnnotations.images[data.name.split('/').pop()] || {};
+        return {
+          id: `${data.name}-${index}`,
+          name: data.name,
+          width: ann.width || 0,
+          height: ann.height || 0,
+          url: '', // dynamic
+        }
+      })
       startTransition(() => {
         setImages(nextRecords)
       })
@@ -941,7 +963,10 @@ export default function App() {
   }
 
   async function clearImages() {
-    imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
+    setExtractedUrls(current => {
+      Object.values(current).forEach(url => URL.revokeObjectURL(url));
+      return {};
+    });
     setImages([])
     setAnnotations({ labels: {}, images: {} })
     await clearFolderHandle()
@@ -1003,107 +1028,182 @@ export default function App() {
       <div className="bg-orb bg-orb-right" />
 
       <main className="page">
-        <section className="hero-panel">
-          <div className="hero-actions">
-            <button type="button" className="primary-btn" onClick={openZipPicker}>
-              Chọn file ZIP
+        {/* ─── TOP NAVBAR ─── */}
+        <header className="hero-panel">
+          {/* Brand */}
+          <div className="navbar-brand">
+            <div className="brand-dot" />
+            <span>ImageView</span>
+          </div>
+
+          {/* Center: action buttons */}
+          <div className="hero-actions" style={{ margin: 0 }}>
+            <button type="button" className="primary-btn" onClick={openZipPicker} style={{ padding: '0.5rem 1.2rem', fontSize: '0.85rem' }}>
+              ＋ Chọn file ZIP
             </button>
-            <button type="button" className="ghost-btn" onClick={clearImages} disabled={!images.length && !hasSavedFolder}>
+            <button type="button" className="ghost-btn" onClick={clearImages} disabled={!images.length && !hasSavedFolder} style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}>
               Xóa tất cả
             </button>
           </div>
 
-          {showReloadPrompt && (
-            <div className="reload-overlay" style={{
-              marginTop: '16px',
-              padding: '16px',
-              background: 'rgba(255,255,255,0.05)',
-              borderRadius: '8px',
-              border: '1px solid rgba(255,255,255,0.1)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: '16px'
-            }}>
-              <div>
-                <strong style={{ display: 'block', color: 'white' }}>Phát hiện dữ liệu ZIP cũ!</strong>
-                <span style={{ fontSize: '0.9em', color: 'rgba(255,255,255,0.7)' }}>Bạn có muốn khôi phục lại file ZIP này không? (Trình duyệt sẽ yêu cầu quyền đọc)</span>
-              </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button type="button" className="primary-btn" onClick={reloadFolder}>
-                  Đồng ý tải lại
-                </button>
-                <button type="button" className="ghost-btn" onClick={skipReload}>
-                  Bỏ qua
-                </button>
-              </div>
-            </div>
-          )}
-
+          {/* Right: stats */}
           <div className="hero-stats">
-            <article>
-              <span>{images.length}</span>
-              <p>Tổng ảnh đã nạp</p>
-            </article>
-            <article style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '80px' }}>
-              {isLoading ? (
-                <span className="loading-spinner" />
-              ) : loadDone ? (
-                <>
-                  <span style={{ color: '#4ade80', fontSize: 'clamp(1.8rem, 4vw, 2.8rem)', fontWeight: 700 }}>OK</span>
-                </>
-              ) : null}
-            </article>
+            {images.length > 0 && (
+              <article>
+                <span>{images.length}</span>
+                <p>ảnh</p>
+              </article>
+            )}
+            {isLoading ? (
+              <span className="loading-spinner" style={{ width: 20, height: 20, borderWidth: 2 }} />
+            ) : loadDone && images.length > 0 ? (
+              <span className="stat-ok-badge">Sẵn sàng</span>
+            ) : null}
           </div>
-        </section>
+        </header>
 
-        <section className="gallery-panel">
-          <div className="section-heading">
-            <div>
-              <p className="section-kicker">Preview list</p>
-
+        {/* ─── RELOAD PROMPT ─── */}
+        {showReloadPrompt && (
+          <div style={{
+            margin: '0',
+            padding: '12px 2rem',
+            background: 'rgba(255, 165, 50, 0.08)',
+            borderBottom: '1px solid rgba(255, 165, 50, 0.2)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '16px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: '1rem' }}>💾</span>
+              <div>
+                <strong style={{ display: 'block', color: '#ffcf91', fontSize: '0.88rem' }}>Phát hiện dữ liệu ZIP cũ!</strong>
+                <span style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.5)' }}>Bạn có muốn khôi phục lại file ZIP này không?</span>
+              </div>
             </div>
-            <p className="section-note">
-              {isLoading && 'Đang đọc thông tin ảnh...'}
-            </p>
+            <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+              <button type="button" className="primary-btn" onClick={reloadFolder} style={{ padding: '0.4rem 1rem', fontSize: '0.82rem' }}>
+                Khôi phục
+              </button>
+              <button type="button" className="ghost-btn" onClick={skipReload} style={{ padding: '0.4rem 0.9rem', fontSize: '0.82rem' }}>
+                Bỏ qua
+              </button>
+            </div>
           </div>
+        )}
 
+        {/* ─── DASHBOARD ─── */}
+        <section className="gallery-panel">
           {!images.length ? (
-            <div className="empty-gallery">
-              <h3>Chưa có ảnh nào được nạp</h3>
+            /* Empty state */
+            <div className="dash-empty">
+              <div className="dash-empty-icon">📦</div>
+              <h3>Chưa có file nào được mở</h3>
+              <p>Chọn một file ZIP chứa ảnh để bắt đầu xem trước</p>
+              <button type="button" className="primary-btn dash-cta-btn" onClick={openZipPicker}>
+                ＋ Chọn file ZIP
+              </button>
             </div>
           ) : (
-            <div className="preview-list" role="list">
-              {images.slice(0, visibleCount).map((image) => (
-                <article key={image.id} className="preview-item" role="listitem">
-                  <button type="button" className="preview-button" onClick={() => openImageInNewTab(image)}>
-                    <img src={image.url} alt={image.name} loading="lazy" onLoad={(e) => handleThumbnailLoad(image.id, e)} />
-                  </button>
-
-                  <div className="preview-meta">
-                    <strong title={image.name}>{image.name}</strong>
-                    <span>
-                      {image.width ? `${image.width} x ${image.height}` : '...'}
-                    </span>
+            <div className="dashboard">
+              {/* ─── OPEN PREVIEW - CTA ─── */}
+              <div className="dash-launch">
+                <div className="dash-launch-info">
+                  <div className="dash-launch-icon">🎬</div>
+                  <div>
+                    <strong>Mở Preview Viewer</strong>
+                    <span>Xem và điều hướng ảnh từ file ZIP trong cửa sổ riêng</span>
                   </div>
-                </article>
-              ))}
-              {visibleCount < images.length && (
-                <div className="show-more-actions" style={{
-                  gridColumn: '1 / -1',
-                  display: 'flex',
-                  justifyContent: 'center',
-                  gap: '12px',
-                  padding: '40px 0'
-                }}>
-                  <button type="button" className="primary-btn" onClick={() => setVisibleCount(prev => prev + 100)}>
-                    Xem thêm 100 ảnh
-                  </button>
-                  <button type="button" className="ghost-btn" onClick={() => setVisibleCount(images.length)}>
-                    Xem tất cả {images.length} ảnh
-                  </button>
                 </div>
-              )}
+                <button
+                  type="button"
+                  className="dash-open-btn"
+                  onClick={() => openImageInNewTab(images[0])}
+                  disabled={!images.length}
+                >
+                  <span className="dash-open-icon">▶</span>
+                  Mở Preview
+                </button>
+              </div>
+
+              {/* ─── STATS GRID ─── */}
+              <div className="dash-stats">
+                <div className="dash-stat-card">
+                  <div className="dash-stat-icon">🖼</div>
+                  <div className="dash-stat-body">
+                    <span className="dash-stat-value">{images.length.toLocaleString()}</span>
+                    <span className="dash-stat-label">Tổng số ảnh</span>
+                  </div>
+                </div>
+
+                <div className="dash-stat-card">
+                  <div className="dash-stat-icon">📁</div>
+                  <div className="dash-stat-body">
+                    <span className="dash-stat-value">
+                      {(() => {
+                        const folders = new Set(images.map(img => {
+                          const parts = img.name.split('/');
+                          parts.pop();
+                          return parts.join('/') || '/';
+                        }));
+                        return folders.size;
+                      })()}
+                    </span>
+                    <span className="dash-stat-label">Thư mục</span>
+                  </div>
+                </div>
+
+                <div className="dash-stat-card">
+                  <div className="dash-stat-icon">✅</div>
+                  <div className="dash-stat-body">
+                    <span className="dash-stat-value" style={{ color: 'var(--success)' }}>
+                      {loadDone ? 'Sẵn sàng' : isLoading ? 'Đang nạp...' : '—'}
+                    </span>
+                    <span className="dash-stat-label">Trạng thái</span>
+                  </div>
+                </div>
+
+                <div className="dash-stat-card">
+                  <div className="dash-stat-icon">🔖</div>
+                  <div className="dash-stat-body">
+                    <span className="dash-stat-value">
+                      {Object.keys(annotations.labels).length > 0
+                        ? Object.keys(annotations.labels).length
+                        : '—'}
+                    </span>
+                    <span className="dash-stat-label">Label</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* ─── FILE INFO ─── */}
+              <div className="dash-info-row">
+                <div className="dash-info-card">
+                  <span className="dash-info-label">📦 Nguồn dữ liệu</span>
+                  <span className="dash-info-value">ZIP Archive (File System Access API)</span>
+                </div>
+                <div className="dash-info-card">
+                  <span className="dash-info-label">🖼 Ảnh đầu tiên</span>
+                  <span className="dash-info-value">{images[0]?.name.split('/').pop() ?? '—'}</span>
+                </div>
+                <div className="dash-info-card">
+                  <span className="dash-info-label">🖼 Ảnh cuối cùng</span>
+                  <span className="dash-info-value">{images[images.length - 1]?.name.split('/').pop() ?? '—'}</span>
+                </div>
+              </div>
+
+              {/* ─── SHORTCUTS ─── */}
+              <div className="dash-shortcuts">
+                <p className="dash-shortcuts-title">⌨️ Phím tắt trong Viewer</p>
+                <div className="dash-shortcuts-grid">
+                  <div className="dash-shortcut"><kbd>F</kbd> / <kbd>→</kbd><span>Ảnh tiếp theo</span></div>
+                  <div className="dash-shortcut"><kbd>D</kbd> / <kbd>←</kbd><span>Ảnh trước</span></div>
+                  <div className="dash-shortcut"><kbd>Cuộn chuột</kbd><span>Zoom in/out</span></div>
+                  <div className="dash-shortcut"><kbd>Click giữ</kbd><span>Di chuyển ảnh</span></div>
+                  <div className="dash-shortcut"><kbd>Ctrl+F</kbd><span>Tìm kiếm theo ID</span></div>
+                  <div className="dash-shortcut"><kbd>Double-click</kbd><span>Fit về kích thước gốc</span></div>
+                </div>
+              </div>
             </div>
           )}
         </section>
