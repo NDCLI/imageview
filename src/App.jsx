@@ -379,7 +379,6 @@ export default function App() {
   function openImageInNewTab(image) {
     const snapshot = imagesRef.current.map((currentImage) => ({
       id: currentImage.id,
-      url: currentImage.url,
       name: currentImage.name,
       width: currentImage.width,
       height: currentImage.height,
@@ -390,19 +389,18 @@ export default function App() {
       return
     }
 
-    localStorage.setItem(
-      VIEWER_STATE_KEY,
-      JSON.stringify({
-        images: snapshot,
-        selectedImageId: image.id,
-        savedAt: Date.now(),
-      }),
-    )
-
-    localStorage.setItem(
-      'local-image-viewer-annotations',
-      JSON.stringify(annotations)
-    )
+    try {
+      localStorage.setItem(
+        VIEWER_STATE_KEY,
+        JSON.stringify({
+          images: snapshot,
+          selectedImageId: image.id,
+          savedAt: Date.now(),
+        }),
+      )
+    } catch (err) {
+      console.warn('Không thể lưu trạng thái preview vào localStorage:', err)
+    }
 
     // Force open in new tab with explicit target (reusing the same viewer tab)
     const viewerUrl = `${window.location.pathname}?viewer=1&index=${currentIndex}`
@@ -410,9 +408,8 @@ export default function App() {
     if (newTab) {
       newTab.focus()
     } else {
-      // Fallback if popup is blocked - we should NOT replace the current tab, 
-      // just inform the user instead of destroying their preview page.
-      alert('Vui lòng cho phép mở popup (Allow Popups) để xem tab ảnh!')
+      console.warn('Popup bị chặn hoặc không mở được tab mới, chuyển về cùng một tab')
+      window.location.assign(viewerUrl)
     }
   }
 
