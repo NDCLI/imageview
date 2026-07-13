@@ -1,9 +1,8 @@
-import { startTransition, useEffect, useRef, useState } from 'react'
+import { createSignal, createEffect, onMount, onCleanup, Show, For, startTransition, untrack } from 'solid-js'
 import { unzip } from 'unzipit'
 import { getFolderHandle, setFolderHandle, clearFolderHandle } from './storage'
 
 const PREVIEW_TAB_NAME = 'image-viewer-tab'
-
 const VIEWER_STATE_KEY = 'local-image-viewer-state'
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 100
@@ -64,7 +63,6 @@ function getFitState(imageWidth, imageHeight, stage) {
   return { scale, panX, panY }
 }
 
-
 function getViewerRouteState() {
   const params = new URLSearchParams(window.location.search)
   const rawIndex = Number.parseInt(params.get('index') || '0', 10)
@@ -96,358 +94,286 @@ function writeViewerIndexToUrl(index) {
   window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. VIEWER PAGE COMPONENT
+// ─────────────────────────────────────────────────────────────────────────────
+function ViewerPage(props) {
+  const [viewerImages, setViewerImages] = createSignal(readViewerImagesFromStorage())
+  const [viewerIndex, setViewerIndex] = createSignal(props.initialRouteState.index)
+  const [searchQuery, setSearchQuery] = createSignal('')
+  const [viewerTx, setViewerTx] = createSignal({ scale: 1, panX: 0, panY: 0 })
+  const [viewerAnnotations, setViewerAnnotations] = createSignal({ labels: {}, images: {} })
+  const [showReloadPrompt, setShowReloadPrompt] = createSignal(false)
+  const [showBoxes, setShowBoxes] = createSignal(false)
+  const [zipEntries, setZipEntries] = createSignal(null)
+  const [extractedUrls, setExtractedUrls] = createSignal({})
+  const [displayedViewerIndex, setDisplayedViewerIndex] = createSignal(props.initialRouteState.index)
+  const [image1Url, setImage1Url] = createSignal('')
+  const [image2Url, setImage2Url] = createSignal('')
+  const [activeBuffer, setActiveBuffer] = createSignal(1) // 1 or 2
 
-export default function App() {
-  // Viewer mode with free panning and zoom at cursor
-  const initialRouteState = getViewerRouteState()
-  const [viewerImages, setViewerImages] = useState(() =>
-    initialRouteState.isViewer ? readViewerImagesFromStorage() : [],
-  )
-  const [viewerIndex, setViewerIndex] = useState(initialRouteState.index)
-  const [searchQuery, setSearchQuery] = useState('')
-  const searchInputRef = useRef(null)
-  const viewerTxRef = useRef({ scale: 1, panX: 0, panY: 0 })
-  const [viewerTx, setViewerTx] = useState({ scale: 1, panX: 0, panY: 0 })
-  const [annotations, setAnnotations] = useState({ labels: {}, images: {} })
-  const [viewerAnnotations, setViewerAnnotations] = useState(() => {
-    if (!initialRouteState.isViewer) return { labels: {}, images: {} }
-    try {
-      const raw = localStorage.getItem('local-image-viewer-annotations')
-      return raw ? JSON.parse(raw) : { labels: {}, images: {} }
-    } catch {
-      return { labels: {}, images: {} }
+  const displayedImage = () => {
+    const list = viewerImages()
+    if (list.length === 0) return null
+    return list[Math.min(Math.max(displayedViewerIndex(), 0), list.length - 1)]
+  }
+
+  createEffect(() => {
+    const url = extractedUrls()[viewerIndex()]
+    if (!url) return
+
+    const currentActive = activeBuffer()
+    const activeUrl = currentActive === 1 ? image1Url() : image2Url()
+    
+    // If the target URL is already loaded and active, we just sync displayedViewerIndex immediately
+    if (url === activeUrl) {
+      setDisplayedViewerIndex(viewerIndex())
+      return
+    }
+
+    // If the active buffer is empty (initial load), load directly into it
+    if (currentActive === 1 && !image1Url()) {
+      setImage1Url(url)
+      setDisplayedViewerIndex(viewerIndex()) // sync immediately for first load
+      return
+    }
+    if (currentActive === 2 && !image2Url()) {
+      setImage2Url(url)
+      setDisplayedViewerIndex(viewerIndex()) // sync immediately for first load
+      return
+    }
+
+    // Otherwise, load into the inactive buffer to prevent flash
+    if (currentActive === 1) {
+      setImage2Url(url)
+    } else {
+      setImage1Url(url)
     }
   })
-  const viewerStageRef = useRef(null)
-  const viewerDragRef = useRef(null)
-  const lastFitScaleRef = useRef(1)
-  const isViewerMode = initialRouteState.isViewer
 
-  useEffect(() => {
-    if (!isViewerMode) {
-      window.name = 'image-preview-main'
-      document.title = 'Preview'
-    } else {
-      window.name = 'image-viewer-tab'
-      document.title = 'Images Preview'
+  // Pre-decode image so browser has it ready to paint instantly
+  function preDecodeUrl(url) {
+    const img = new Image()
+    img.src = url
+    if (img.decode) img.decode().catch(() => {})
+  }
+  
+  let searchInput
+  let viewerStage = null
+  let viewerDrag = null
+  let lastFitScale = 1
+  let channel = null
+  const requestedImages = new Set()
+
+  const activeImage = () => {
+    const list = viewerImages()
+    if (list.length === 0) return null
+    return list[Math.min(Math.max(viewerIndex(), 0), list.length - 1)]
+  }
+
+  onMount(() => {
+    document.title = 'Images Preview'
+    window.name = PREVIEW_TAB_NAME
+
+    // BroadcastChannel for cross-tab communication (Viewer side)
+    channel = new BroadcastChannel('image-view-channel')
+    channel.onmessage = (e) => {
+      if (e.data.type === 'RES_IMG') {
+        const url = URL.createObjectURL(e.data.blob)
+        preDecodeUrl(url)
+        setExtractedUrls(prev => {
+          if (prev[e.data.idx]) URL.revokeObjectURL(prev[e.data.idx])
+          return { ...prev, [e.data.idx]: url }
+        })
+        setShowReloadPrompt(false)
+      }
     }
-  }, [isViewerMode])
 
-  const [images, setImages] = useState([])
-  const [isLoading, setIsLoading] = useState(false)
-  const [loadDone, setLoadDone] = useState(false)
-  const [hasSavedFolder, setHasSavedFolder] = useState(false)
-  const [showReloadPrompt, setShowReloadPrompt] = useState(false)
-  const [showBoxes, setShowBoxes] = useState(false)
-  const imagesRef = useRef([])
-  const [zipEntries, setZipEntries] = useState(null)
-  const [extractedUrls, setExtractedUrls] = useState({})
-  const channelRef = useRef(null)
-  const requestedImagesRef = useRef(new Set())
+    onCleanup(() => {
+      if (channel) channel.close()
+    })
+  })
 
-  // BroadcastChannel for cross-tab communication (Main <-> Viewer)
-  useEffect(() => {
-    channelRef.current = new BroadcastChannel('image-view-channel')
-    
-    if (!isViewerMode) {
-      // Main tab: listen for requests and send blobs
-      channelRef.current.onmessage = async (e) => {
-        if (e.data.type === 'REQ_IMG' && zipEntries) {
-          const entry = zipEntries[e.data.name];
-          if (entry) {
-            try {
-              const blob = await entry.blob();
-              channelRef.current.postMessage({ type: 'RES_IMG', idx: e.data.idx, blob });
-            } catch (err) {
-              console.error('Lỗi khi đọc blob qua channel:', err);
-            }
-          }
+  // Restore annotations from localStorage first (fallback)
+  onMount(() => {
+    try {
+      const raw = localStorage.getItem('local-image-viewer-annotations')
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (parsed && parsed.labels && parsed.images) {
+          setViewerAnnotations(parsed)
         }
       }
-    } else {
-      // Viewer tab: receive blobs
-      channelRef.current.onmessage = (e) => {
-        if (e.data.type === 'RES_IMG') {
-          const url = URL.createObjectURL(e.data.blob);
-          setExtractedUrls(prev => {
-            if (prev[e.data.idx]) URL.revokeObjectURL(prev[e.data.idx]);
-            return { ...prev, [e.data.idx]: url };
-          });
-          // Hide reload prompt since we got data from main tab
-          setShowReloadPrompt(false);
-        }
-      }
+    } catch (e) {
+      console.warn('Không thể đọc annotations từ localStorage:', e)
     }
+  })
 
-    return () => {
-      if (channelRef.current) {
-        channelRef.current.close();
-      }
-    }
-  }, [isViewerMode, zipEntries])
-
-  useEffect(() => {
-    // Cache busting: Force reload if a new build is detected
-    const currentBuild = typeof __BUILD_DATE__ !== 'undefined' ? __BUILD_DATE__ : null;
-    if (currentBuild) {
-      const lastBuild = localStorage.getItem('last_build_date');
-      if (lastBuild && lastBuild !== String(currentBuild)) {
-        console.log("New build detected! Reloading to clear cache...");
-        localStorage.setItem('last_build_date', String(currentBuild));
-        window.location.reload(true);
-      } else {
-        localStorage.setItem('last_build_date', String(currentBuild));
-      }
-    }
-  }, []);
-
-  const [visibleCount, setVisibleCount] = useState(50)
-
-  useEffect(() => {
+  // Restore folder handle if available (zip annotations will override localStorage)
+  onMount(() => {
     getFolderHandle().then(async (handle) => {
       if (handle) {
-        setHasSavedFolder(true)
-        if (isViewerMode) {
-          try {
-            const perm = await handle.queryPermission({ mode: 'read' })
-            if (perm !== 'granted') {
-              setShowReloadPrompt(true)
-              return
-            }
-            const zipFile = await handle.getFile()
-            const { entries } = await unzip(zipFile)
-            setZipEntries(entries)
-            
-            // Extract annotations if present in viewer mode
-            let annFileContent = null
-            for (const [path, entry] of Object.entries(entries)) {
-              if (path.endsWith('annotations.xml')) {
-                annFileContent = await entry.text()
-                break
-              }
-            }
-            if (annFileContent) {
-              const parsed = parseAnnotations(annFileContent)
-              setViewerAnnotations(parsed)
-            }
-            // Trigger state change to fetch active images
-            setImages([]) 
-          } catch (e) {
-            console.error('Lỗi khi nạp zip trong viewer:', e)
+        try {
+          const perm = await handle.queryPermission({ mode: 'read' })
+          if (perm !== 'granted') {
             setShowReloadPrompt(true)
+            return
           }
-        } else {
-          // Hiển thị thông báo nếu chưa có ảnh nào được nạp ở tab chính (persistence qua restart)
-          if (imagesRef.current.length === 0) {
-            setShowReloadPrompt(true)
+          const zipFile = await handle.getFile()
+          const { entries } = await unzip(zipFile)
+          setZipEntries(entries)
+          
+          let annFileContent = null
+          for (const [path, entry] of Object.entries(entries)) {
+            if (path.endsWith('annotations.xml')) {
+              annFileContent = await entry.text()
+              break
+            }
           }
+          if (annFileContent) {
+            const parsed = parseAnnotations(annFileContent)
+            setViewerAnnotations(parsed)
+          }
+        } catch (e) {
+          console.error('Lỗi khi nạp zip trong viewer:', e)
+          setShowReloadPrompt(true)
         }
       }
     }).catch(() => { })
-  }, [isViewerMode])
+  })
 
-  useEffect(() => {
-    setVisibleCount(50)
-  }, [images.length])
+  onCleanup(() => {
+    // Revoke all created URLs
+    Object.values(extractedUrls()).forEach(url => URL.revokeObjectURL(url))
+  })
 
-  useEffect(() => {
-    imagesRef.current = images
-  }, [images])
+  // Sliding window pre-fetching effect
+  createEffect(() => {
+    const displayImages = viewerImages()
+    if (displayImages.length === 0) return
 
-  useEffect(() => {
-    return () => {
-      setExtractedUrls(current => {
-        Object.values(current).forEach(url => URL.revokeObjectURL(url));
-        return {};
-      });
-    }
-  }, [])
+    const activeIdx = viewerIndex()
+    let timer
 
-  // Sliding window pre-fetching effect for viewer mode
-  useEffect(() => {
-    // Both Main and Viewer run this, but Viewer relies on Channel if no zipEntries
-    const displayImages = images.length > 0 ? images : viewerImages;
-    if (displayImages.length === 0) return;
-
-    const activeIdx = viewerIndex;
-    const neighborRange = new Set();
-    for (let offset = -2; offset <= 2; offset++) {
-      const idx = viewerIndex + offset;
-      if (idx >= 0 && idx < displayImages.length) {
-        neighborRange.add(idx);
-      }
-    }
-
-    // Clean up URLs out of neighbor range IMMEDIATELY to free RAM
-    setExtractedUrls(prev => {
-      const nextUrls = { ...prev };
-      let changed = false;
-      Object.keys(nextUrls).forEach(idxStr => {
-        const idx = parseInt(idxStr, 10);
-        if (!neighborRange.has(idx)) {
-          URL.revokeObjectURL(nextUrls[idx]);
-          delete nextUrls[idx];
-          requestedImagesRef.current.delete(idx);
-          changed = true;
+    untrack(() => {
+      const neighborRange = new Set()
+      for (let offset = -2; offset <= 2; offset++) {
+        const idx = activeIdx + offset
+        if (idx >= 0 && idx < displayImages.length) {
+          neighborRange.add(idx)
         }
-      });
-      return changed ? nextUrls : prev;
-    });
-
-    const fetchImage = (idx) => {
-      if (requestedImagesRef.current.has(idx) || extractedUrls[idx]) return;
-      const imgRecord = displayImages[idx];
-      if (!imgRecord) return;
-
-      if (zipEntries) {
-        // Direct local read
-        const entry = zipEntries[imgRecord.name];
-        if (entry) {
-          requestedImagesRef.current.add(idx);
-          entry.blob().then(blob => {
-            const url = URL.createObjectURL(blob);
-            setExtractedUrls(current => {
-              if (neighborRange.has(idx) && !current[idx]) {
-                return { ...current, [idx]: url };
-              } else {
-                URL.revokeObjectURL(url);
-                return current;
-              }
-            });
-          });
-        }
-      } else if (isViewerMode && channelRef.current) {
-        // Request from main tab via channel
-        requestedImagesRef.current.add(idx);
-        channelRef.current.postMessage({ type: 'REQ_IMG', idx, name: imgRecord.name });
       }
-    };
 
-    // 1. Fetch active image IMMEDIATELY for instant loading
-    fetchImage(activeIdx);
+      // Clean up URLs out of neighbor range IMMEDIATELY
+      setExtractedUrls(prev => {
+        const nextUrls = { ...prev }
+        let changed = false
+        Object.keys(nextUrls).forEach(idxStr => {
+          const idx = parseInt(idxStr, 10)
+          if (!neighborRange.has(idx)) {
+            URL.revokeObjectURL(nextUrls[idx])
+            delete nextUrls[idx]
+            requestedImages.delete(idx)
+            changed = true
+          }
+        })
+        return changed ? nextUrls : prev
+      })
 
-    // 2. Debounce pre-fetching of neighboring images (150ms) to avoid lag when holding Next button
-    const timer = setTimeout(() => {
-      neighborRange.forEach(idx => {
-        if (idx !== activeIdx) fetchImage(idx);
-      });
-    }, 150);
+      const fetchImage = (idx) => {
+        if (requestedImages.has(idx) || extractedUrls()[idx]) return
+        const imgRecord = displayImages[idx]
+        if (!imgRecord) return
 
-    return () => clearTimeout(timer);
-  }, [viewerIndex, images, viewerImages, zipEntries, extractedUrls]);
+        const entries = zipEntries()
+        if (entries) {
+          const entry = entries[imgRecord.name]
+          if (entry) {
+            requestedImages.add(idx)
+            entry.blob().then(blob => {
+              const url = URL.createObjectURL(blob)
+              preDecodeUrl(url)
+              setExtractedUrls(current => {
+                if (neighborRange.has(idx) && !current[idx]) {
+                  return { ...current, [idx]: url }
+                } else {
+                  URL.revokeObjectURL(url)
+                  return current
+                }
+              })
+            })
+          }
+        } else if (channel) {
+          requestedImages.add(idx)
+          channel.postMessage({ type: 'REQ_IMG', idx, name: imgRecord.name })
+        }
+      }
 
-  useEffect(() => {
-    if (!isViewerMode) {
-      return undefined
-    }
+      fetchImage(activeIdx)
 
+      timer = setTimeout(() => {
+        neighborRange.forEach(idx => {
+          if (idx !== activeIdx) fetchImage(idx)
+        })
+      }, 150)
+    })
+
+    onCleanup(() => clearTimeout(timer))
+  })
+
+  // Listen to cross-tab storage changes
+  onMount(() => {
     function handleStorage(event) {
       if (event.key === VIEWER_STATE_KEY) {
         setViewerImages(readViewerImagesFromStorage())
       }
     }
-
     window.addEventListener('storage', handleStorage)
-    return () => window.removeEventListener('storage', handleStorage)
-  }, [isViewerMode])
+    onCleanup(() => window.removeEventListener('storage', handleStorage))
+  })
 
-  useEffect(() => {
-    if (!isViewerMode) {
-      return
-    }
-
-    const displayImages = images.length > 0 ? images : viewerImages
+  // Sync index with URL and search query
+  createEffect(() => {
+    const displayImages = viewerImages()
     const maxIndex = Math.max(0, displayImages.length - 1)
-    const safeIndex = Math.min(Math.max(viewerIndex, 0), maxIndex)
+    const safeIndex = Math.min(Math.max(viewerIndex(), 0), maxIndex)
 
-    if (safeIndex !== viewerIndex) {
+    if (safeIndex !== viewerIndex()) {
       setViewerIndex(safeIndex)
       return
     }
 
     writeViewerIndexToUrl(safeIndex)
     if (displayImages[safeIndex]) {
-      if (document.activeElement !== searchInputRef.current) {
+      if (document.activeElement !== searchInput) {
         setSearchQuery(displayImages[safeIndex].name)
       }
     }
-  }, [isViewerMode, viewerImages, viewerIndex, images])
-
-
-
-
-  function openImageInNewTab(image) {
-    const snapshot = imagesRef.current.map((currentImage) => ({
-      id: currentImage.id,
-      name: currentImage.name,
-      width: currentImage.width,
-      height: currentImage.height,
-    }))
-
-    const currentIndex = snapshot.findIndex((item) => item.id === image.id)
-    if (currentIndex < 0) {
-      return
-    }
-
-    try {
-      localStorage.setItem(
-        VIEWER_STATE_KEY,
-        JSON.stringify({
-          images: snapshot,
-          selectedImageId: image.id,
-          savedAt: Date.now(),
-        }),
-      )
-    } catch (err) {
-      console.warn('Không thể lưu trạng thái preview vào localStorage:', err)
-    }
-
-    // Force open in new tab with explicit target (reusing the same viewer tab)
-    const viewerUrl = `${window.location.pathname}?viewer=1&index=${currentIndex}`
-    const newTab = window.open(viewerUrl, PREVIEW_TAB_NAME)
-    if (newTab) {
-      newTab.focus()
-    } else {
-      console.warn('Popup bị chặn hoặc không mở được tab mới, chuyển về cùng một tab')
-      window.location.assign(viewerUrl)
-    }
-  }
+  })
 
   function goToPreviousImage() {
     setViewerIndex((current) => Math.max(0, current - 1))
   }
 
   function goToNextImage() {
-    const displayImages = images.length > 0 ? images : viewerImages
+    const displayImages = viewerImages()
     setViewerIndex((current) => Math.min(displayImages.length - 1, current + 1))
-  }
-
-  function updateViewerTx(next) {
-    viewerTxRef.current = next
-    setViewerTx(next)
   }
 
   function constrainViewerPan(tx, stage) {
     if (!stage) return tx
-
     const { scale, panX, panY } = tx
 
     const bounds = stage.getBoundingClientRect()
     const stageWidth = bounds.width
     const stageHeight = bounds.height
 
-    const displayImages = images.length > 0 ? images : viewerImages
-    const activeImage = displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)]
-    if (!activeImage || activeImage.width === 0 || activeImage.height === 0) {
-      return tx
-    }
+    const img = displayedImage()
+    if (!img || img.width === 0 || img.height === 0) return tx
 
-    const imgWidth = activeImage.width * scale
-    const imgHeight = activeImage.height * scale
+    const imgWidth = img.width * scale
+    const imgHeight = img.height * scale
 
-    // Allow free panning with larger bounds for zoomed images
-    // This lets users drag fully across the image at all zoom levels
-    // Relax constraints significantly for freedom of movement (like CVAT)
     const maxPanX = imgWidth + stageWidth * 5
     const maxPanY = imgHeight + stageHeight * 5
 
@@ -458,109 +384,99 @@ export default function App() {
   }
 
   function resetViewerZoom() {
-    const stage = viewerStageRef.current
-    const displayImages = images.length > 0 ? images : viewerImages
-    const activeImage = displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)]
+    const stage = viewerStage
+    const img = displayedImage()
     
-    if (stage && activeImage && activeImage.width > 0) {
-      const fit = getFitState(activeImage.width, activeImage.height, stage)
-      viewerTxRef.current = fit
+    if (stage && img && img.width > 0) {
+      const fit = getFitState(img.width, img.height, stage)
       setViewerTx(fit)
-      lastFitScaleRef.current = fit.scale
+      lastFitScale = fit.scale
     } else {
       const reset = { scale: 1, panX: 0, panY: 0 }
-      viewerTxRef.current = reset
       setViewerTx(reset)
-      lastFitScaleRef.current = 1
+      lastFitScale = 1
     }
   }
 
-  // Handle maintaining zoom vs resetting to fit when switching images
-  useEffect(() => {
-    if (!isViewerMode) return
+  // Maintain zoom or reset to fit when switching images
+  createEffect(() => {
+    // Run this when displayed index actually changes
+    const dispIdx = displayedViewerIndex()
+    
+    untrack(() => {
+      const currentScale = viewerTx().scale
+      const isAtFitScale = Math.abs(currentScale - lastFitScale) < 0.01
+      const stage = viewerStage
+      const img = displayedImage()
 
-    const displayImages = images.length > 0 ? images : viewerImages
-    const activeImage = displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)]
+      // Image not loaded yet (width=0) — keep current viewerTx, will be handled in onLoad
+      if (!img || img.width === 0) return
 
-    const currentScale = viewerTxRef.current.scale
-    const isAtFitScale = Math.abs(currentScale - lastFitScaleRef.current) < 0.01
+      if (isAtFitScale) {
+        resetViewerZoom()
+      }
+      // User has zoomed — keep scale + pan exactly as-is for position comparison
+    })
+  })
 
-    if (isAtFitScale) {
-      // If we were at fit scale on the previous image, reset to fit on the new image
-      resetViewerZoom()
-    }
-  }, [viewerIndex, images, viewerImages])
-
-  useEffect(() => {
-    if (!isViewerMode) {
-      return
-    }
-
+  // Fit scale when mode matches
+  onMount(() => {
     resetViewerZoom()
-  }, [isViewerMode])
+  })
 
-  useEffect(() => {
-    if (!isViewerMode) {
-      return undefined
+  // Wheel zoom effect
+  function onWheel(event) {
+    event.preventDefault()
+    if (!viewerStage) return
+
+    const { scale, panX, panY } = viewerTx()
+    const bounds = viewerStage.getBoundingClientRect()
+    const cx = event.clientX - bounds.left
+    const cy = event.clientY - bounds.top
+
+    const ix = (cx - panX) / scale
+    const iy = (cy - panY) / scale
+
+    const zoomFactor = event.deltaY < 0 ? 1.1 : 0.9
+    let newScale = scale * zoomFactor
+
+    newScale = Math.min(Math.max(newScale, MIN_ZOOM), MAX_ZOOM)
+
+    const newPanX = cx - ix * newScale
+    const newPanY = cy - iy * newScale
+
+    const newTx = { scale: newScale, panX: newPanX, panY: newPanY }
+    const constrainedTx = constrainViewerPan(newTx, viewerStage)
+    setViewerTx(constrainedTx)
+  }
+
+  // Ref callback to cleanly handle mount/unmount event bindings
+  const handleStageRef = (el) => {
+    if (viewerStage) {
+      viewerStage.removeEventListener('wheel', onWheel)
     }
-
-    const stage = viewerStageRef.current
-    if (!stage) {
-      return undefined
+    viewerStage = el
+    if (el) {
+      el.addEventListener('wheel', onWheel, { passive: false })
     }
+  }
 
-    function onWheel(event) {
-      event.preventDefault()
-      const { scale, panX, panY } = viewerTxRef.current
-      const bounds = stage.getBoundingClientRect()
-      const cx = event.clientX - bounds.left
-      const cy = event.clientY - bounds.top
-
-      // Calculate zoom center in image coordinates (before zoom)
-      const ix = (cx - panX) / scale
-      const iy = (cy - panY) / scale
-
-      // Multiplicative zoom (like CVAT/Google Maps/etc)
-      // deltaY < 0 means scroll up (zoom in)
-      const zoomFactor = event.deltaY < 0 ? 1.1 : 0.9
-      let newScale = scale * zoomFactor
-
-      // Clamp new scale
-      newScale = Math.min(Math.max(newScale, MIN_ZOOM), MAX_ZOOM)
-
-      // Calculate new pan to keep the same image point (ix, iy) under the cursor (cx, cy)
-      const newPanX = cx - ix * newScale
-      const newPanY = cy - iy * newScale
-
-      const newTx = { scale: newScale, panX: newPanX, panY: newPanY }
-      
-      // Update with the new transformation
-      // Note: We might want to keep the constraint, but let's see if it's too restrictive
-      const constrainedTx = constrainViewerPan(newTx, stage)
-      updateViewerTx(constrainedTx)
+  onCleanup(() => {
+    if (viewerStage) {
+      viewerStage.removeEventListener('wheel', onWheel)
     }
+  })
 
-    stage.addEventListener('wheel', onWheel, { passive: false })
-    return () => stage.removeEventListener('wheel', onWheel)
-  }, [isViewerMode])
-
-  useEffect(() => {
-    if (!isViewerMode) {
-      return undefined
-    }
-
+  // Keyboard navigation
+  onMount(() => {
     function onKeyDown(event) {
       if ((event.ctrlKey || event.metaKey) && (event.key === 'f' || event.key === 'F')) {
         event.preventDefault()
-        if (searchInputRef.current) {
-          searchInputRef.current.focus()
-        }
+        if (searchInput) searchInput.focus()
         return
       }
 
-      if (['INPUT', 'TEXTAREA'].includes(event.target.tagName)) {
-        return
-      }
+      if (['INPUT', 'TEXTAREA'].includes(event.target.tagName)) return
 
       if (event.key === 'ArrowRight' || event.key === 'f' || event.key === 'F') {
         goToNextImage()
@@ -570,8 +486,8 @@ export default function App() {
     }
 
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [isViewerMode])
+    onCleanup(() => window.removeEventListener('keydown', onKeyDown))
+  })
 
   function handleViewerDoubleClick() {
     resetViewerZoom()
@@ -579,337 +495,27 @@ export default function App() {
 
   function handleViewerMouseDown(event) {
     event.preventDefault()
-    if (searchInputRef.current) {
-      searchInputRef.current.blur()
-    }
-    viewerDragRef.current = { lastX: event.clientX, lastY: event.clientY }
+    if (searchInput) searchInput.blur()
+    viewerDrag = { lastX: event.clientX, lastY: event.clientY }
     document.body.style.cursor = 'grabbing'
   }
 
   function handleViewerMouseMove(event) {
-    if (!viewerDragRef.current) {
-      return
-    }
+    if (!viewerDrag) return
 
-    const dx = event.clientX - viewerDragRef.current.lastX
-    const dy = event.clientY - viewerDragRef.current.lastY
-    viewerDragRef.current = { lastX: event.clientX, lastY: event.clientY }
-    const { scale, panX, panY } = viewerTxRef.current
+    const dx = event.clientX - viewerDrag.lastX
+    const dy = event.clientY - viewerDrag.lastY
+    viewerDrag = { lastX: event.clientX, lastY: event.clientY }
+    
+    const { scale, panX, panY } = viewerTx()
     const newTx = { scale, panX: panX + dx, panY: panY + dy }
-    const constrainedTx = constrainViewerPan(newTx, viewerStageRef.current)
-    updateViewerTx(constrainedTx)
+    const constrainedTx = constrainViewerPan(newTx, viewerStage)
+    setViewerTx(constrainedTx)
   }
 
   function handleViewerMouseUp() {
-    viewerDragRef.current = null
+    viewerDrag = null
     document.body.style.cursor = ''
-  }
-
-  if (isViewerMode) {
-    const displayImages = images.length > 0 ? images : viewerImages
-    const hasImages = displayImages.length > 0
-    const activeImage = hasImages ? displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)] : null
-
-    return (
-      <main className="viewer-shell" style={{ position: 'relative', overflow: 'hidden' }}>
-
-        {showReloadPrompt && (
-          <div className="reload-overlay" style={{
-            position: 'fixed',
-            top: '20px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 1000,
-            width: 'min(600px, 90%)',
-            padding: '16px',
-            background: 'rgba(20, 30, 45, 0.95)',
-            borderRadius: '12px',
-            border: '1px solid rgba(255,255,255,0.2)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '16px',
-            boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
-            backdropFilter: 'blur(10px)'
-          }}>
-            <div style={{ textAlign: 'left' }}>
-              <strong style={{ display: 'block', color: 'white' }}>Cần nạp lại dữ liệu ảnh!</strong>
-              <span style={{ fontSize: '0.85em', color: 'rgba(255,255,255,0.7)' }}>Tab chính đã đóng hoặc dữ liệu cũ hết hạn. Bấm để khôi phục.</span>
-            </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button type="button" className="primary-btn" onClick={reloadFolder} style={{ padding: '8px 16px', fontSize: '0.9em' }}>
-                Tải lại
-              </button>
-              <button type="button" className="ghost-btn" onClick={skipReload} style={{ padding: '8px 16px', fontSize: '0.9em' }}>
-                Bỏ qua
-              </button>
-            </div>
-          </div>
-        )}
-        <section className="viewer-panel">
-          {hasImages && activeImage ? (
-            <>
-              <div
-                ref={viewerStageRef}
-                className="viewer-stage"
-                style={{ cursor: viewerTx.scale > 1 ? 'grab' : 'default' }}
-                onMouseDown={handleViewerMouseDown}
-                onMouseMove={handleViewerMouseMove}
-                onMouseUp={handleViewerMouseUp}
-                onMouseLeave={handleViewerMouseUp}
-                onDoubleClick={handleViewerDoubleClick}
-              >
-                <div
-                  className="viewer-image-container"
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    transform: `translate(${viewerTx.panX}px, ${viewerTx.panY}px) scale(${viewerTx.scale})`,
-                    transformOrigin: '0 0',
-                    width: activeImage.width ? `${activeImage.width}px` : 'auto',
-                    height: activeImage.height ? `${activeImage.height}px` : 'auto',
-                  }}
-                >
-                  {extractedUrls[viewerIndex] ? (
-                    <img
-                      src={extractedUrls[viewerIndex]}
-                      alt={activeImage.name}
-                      onLoad={handleViewerImageLoad}
-                      className="viewer-image"
-                      style={{
-                        display: 'block',
-                        width: '100%',
-                        height: '100%',
-                      }}
-                    />
-                  ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', minHeight: '300px' }}>
-                      <span className="loading-spinner" />
-                    </div>
-                  )}
-                  {showBoxes && (
-                    <svg
-                      className="viewer-annotations"
-                      viewBox={(() => {
-                        const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                        const activeName = activeImage.name.toLowerCase();
-                        const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
-                        const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
-                        
-                        const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                          const kn = k.toLowerCase();
-                          if (kn === activeName || kn === simpleActiveName) return true;
-                          const skn = k.split('/').pop().toLowerCase();
-                          if (skn === simpleActiveName) return true;
-                          const ckn = skn.replace(/\.[^/.]+$/, "");
-                          if (ckn === cleanActiveName) return true;
-                          
-                          const ann = currentAnnotations.images[k];
-                          if (ann && ann.id !== null) {
-                             const idStr = ann.id.toString();
-                             if (cleanActiveName === idStr) return true;
-                             const nameNum = cleanActiveName.match(/\d+$/)?.[0];
-                             if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
-                          }
-                          return false;
-                        });
-                        
-                        const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
-                        if (annotationData && annotationData.width && annotationData.height) {
-                          return `0 0 ${annotationData.width} ${annotationData.height}`;
-                        }
-                        return activeImage.width && activeImage.height ? `0 0 ${activeImage.width} ${activeImage.height}` : undefined;
-                      })()}
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        width: '100%',
-                        height: '100%',
-                        pointerEvents: 'none',
-                      }}
-                    >
-                      {(() => {
-                        const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                        const activeName = activeImage.name.toLowerCase();
-                        const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
-                        const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
-                        
-                        const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                          const kn = k.toLowerCase();
-                          if (kn === activeName || kn === simpleActiveName) return true;
-                          const skn = k.split('/').pop().toLowerCase();
-                          if (skn === simpleActiveName) return true;
-                          const ckn = skn.replace(/\.[^/.]+$/, "");
-                          if (ckn === cleanActiveName) return true;
-                          
-                          const ann = currentAnnotations.images[k];
-                          if (ann && ann.id !== null) {
-                             const idStr = ann.id.toString();
-                             if (cleanActiveName === idStr) return true;
-                             const nameNum = cleanActiveName.match(/\d+$/)?.[0];
-                             if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
-                          }
-                          return false;
-                        });
-                        
-                        const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
-                        const boxes = annotationData?.boxes || [];
-
-                        return boxes.map((box, i) => {
-                          const labelColor = currentAnnotations.labels[box.label] || '#ff0000'
-                          return (
-                            <g key={i}>
-                              <rect
-                                x={box.xtl}
-                                y={box.ytl}
-                                width={box.xbr - box.xtl}
-                                height={box.ybr - box.ytl}
-                                fill="transparent"
-                                stroke={labelColor}
-                                strokeWidth={2 / viewerTx.scale}
-                              />
-                              <text
-                                x={box.xtl}
-                                y={box.ytl - 2 / viewerTx.scale}
-                                fill="#ffffff"
-                                style={{
-                                  fontSize: `${12 / viewerTx.scale}px`,
-                                  fontWeight: 'bold',
-                                  paintOrder: 'stroke',
-                                  stroke: labelColor,
-                                  strokeWidth: `${3 / viewerTx.scale}px`,
-                                  dominantBaseline: 'text-after-edge'
-                                }}
-                              >
-                                {box.label}
-                              </text>
-                            </g>
-                          )
-                        });
-                      })()}
-                    </svg>
-                  )}
-                </div>
-              </div>
-              <div className="viewer-meta" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => {
-                    const query = e.target.value.trim();
-                    setSearchQuery(query);
-                    if (!query) return;
-
-                    const displayImages = images.length > 0 ? images : viewerImages;
-                    const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                    let foundIndex = -1;
-
-                    // 1. Try to find by Exact ID from annotations XML
-                    const isNumeric = /^\d+$/.test(query);
-                    if (isNumeric) {
-                      const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                        const ann = currentAnnotations.images[k];
-                        return ann && ann.id !== null && ann.id.toString() === query;
-                      });
-
-                      if (foundKey) {
-                        // Found a filename in XML with this ID, now find its index in our current image list
-                        const cleanKey = foundKey.toLowerCase().split('/').pop();
-                        foundIndex = displayImages.findIndex(img => {
-                          const imgName = img.name.toLowerCase();
-                          return imgName === foundKey.toLowerCase() || imgName.endsWith(cleanKey);
-                        });
-                      }
-                    }
-
-                    // 2. Fallback to simple name inclusion search if not found by ID
-                    if (foundIndex === -1) {
-                      foundIndex = displayImages.findIndex(img => 
-                        img.name.toLowerCase().includes(query.toLowerCase())
-                      );
-                    }
-
-                    if (foundIndex !== -1 && foundIndex !== viewerIndex) {
-                      setViewerIndex(foundIndex);
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === 'Escape') {
-                      e.target.blur()
-                    }
-                  }}
-                  onFocus={() => setSearchQuery('')}
-                  onBlur={() => {
-                    const displayImages = images.length > 0 ? images : viewerImages
-                    if (displayImages[viewerIndex]) {
-                      setSearchQuery(displayImages[viewerIndex].name)
-                    }
-                  }}
-                  style={{
-                    background: 'rgba(0, 0, 0, 0.5)',
-                    border: '1px solid rgba(255, 255, 255, 0.2)',
-                    color: '#fff',
-                    padding: '4px 8px',
-                    borderRadius: '4px',
-                    outline: 'none',
-                    minWidth: '300px',
-                    fontFamily: 'inherit',
-                    fontSize: 'inherit'
-                  }}
-                  placeholder="Dán hoặc nhập tên ảnh để tìm..."
-                  title="Tìm kiếm tên ảnh"
-                />
-                <button
-                  className={`box-toggle-btn ${showBoxes ? 'active' : ''}`}
-                  onClick={() => setShowBoxes(!showBoxes)}
-                  title={showBoxes ? "Ẩn các box annotation" : "Hiện các box annotation"}
-                >
-                  {showBoxes ? 'Hide Boxes' : 'Show Boxes'}
-                </button>
-                <span>
-                  • {viewerIndex + 1}/{displayImages.length} 
-                  <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
-                  {(() => {
-                    const currentAnnotations = images.length > 0 ? annotations : viewerAnnotations;
-                    const activeName = activeImage.name.toLowerCase();
-                    const simpleActiveName = activeImage.name.split('/').pop().toLowerCase();
-                    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "");
-                    const foundKey = Object.keys(currentAnnotations.images).find(k => {
-                      const kn = k.toLowerCase();
-                      if (kn === activeName || kn === simpleActiveName) return true;
-                      const skn = k.split('/').pop().toLowerCase();
-                      if (skn === simpleActiveName) return true;
-                      const ckn = skn.replace(/\.[^/.]+$/, "");
-                      if (ckn === cleanActiveName) return true;
-                      const ann = currentAnnotations.images[k];
-                      if (ann && ann.id !== null) {
-                         const idStr = ann.id.toString();
-                         if (cleanActiveName === idStr) return true;
-                         const nameNum = cleanActiveName.match(/\d+$/)?.[0];
-                         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true;
-                      }
-                      return false;
-                    });
-                    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null;
-                    return annotationData ? `ID: ${annotationData.id}` : 'No ID';
-                  })()}
-                  <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
-                  {activeImage.width} x {activeImage.height} • Zoom {Math.round(viewerTx.scale * 100)}% • ← → để chuyển
-                </span>
-              </div>
-            </>
-          ) : (
-            <div className="empty-gallery">
-              <h3>Tab preview chưa có dữ liệu ảnh</h3>
-              <p>Quay lại tab chính và bấm vào một ảnh để nạp danh sách vào đây.</p>
-            </div>
-          )}
-        </section>
-      </main>
-    )
   }
 
   async function reloadFolder() {
@@ -929,13 +535,503 @@ export default function App() {
     }
   }
 
+  async function readZipHandle(fileHandle) {
+    try {
+      const zipFile = await fileHandle.getFile()
+      const { entries } = await unzip(zipFile)
+      setZipEntries(entries)
+
+      let annFileContent = null
+      for (const [path, entry] of Object.entries(entries)) {
+        if (path.endsWith('annotations.xml')) {
+          annFileContent = await entry.text()
+          break
+        }
+      }
+      if (annFileContent) {
+        const parsed = parseAnnotations(annFileContent)
+        setViewerAnnotations(parsed)
+      }
+    } catch (err) {
+      console.error('Lỗi khi tải lại zip:', err)
+    }
+  }
+
+  async function skipReload() {
+    setShowReloadPrompt(false)
+    await clearFolderHandle()
+  }
+
+  function handleViewerImageLoad(event) {
+    const { naturalWidth, naturalHeight } = event.target
+    if (!naturalWidth) return
+    
+    // Guard against race conditions when loading fast
+    const targetUrl = extractedUrls()[viewerIndex()]
+    if (event.target.src !== targetUrl) {
+      return
+    }
+
+    const list = viewerImages()
+    const img = list[Math.min(Math.max(viewerIndex(), 0), list.length - 1)]
+    if (!img || (img.width === naturalWidth && img.height === naturalHeight)) return
+
+    const wasZero = !img.width || img.width === 0
+
+    setViewerImages((current) =>
+      current.map((item) =>
+        item.id === img.id ? { ...item, width: naturalWidth, height: naturalHeight } : item
+      )
+    )
+
+    if (wasZero) {
+      setTimeout(() => {
+        const currentScale = viewerTx().scale
+        const isAtFitScale = Math.abs(currentScale - lastFitScale) < 0.01
+        if (isAtFitScale) {
+          resetViewerZoom()
+        }
+      }, 0)
+    }
+  }
+
+
+
+  // Annotation utility helpers
+  const getAnnotationViewBox = (img) => {
+    if (!img) return undefined
+    const currentAnnotations = viewerAnnotations()
+    const activeName = img.name.toLowerCase()
+    const simpleActiveName = img.name.split('/').pop().toLowerCase()
+    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "")
+    
+    const foundKey = Object.keys(currentAnnotations.images).find(k => {
+      const kn = k.toLowerCase()
+      if (kn === activeName || kn === simpleActiveName) return true
+      const skn = k.split('/').pop().toLowerCase()
+      if (skn === simpleActiveName) return true
+      const ckn = skn.replace(/\.[^/.]+$/, "")
+      if (ckn === cleanActiveName) return true
+      
+      const ann = currentAnnotations.images[k]
+      if (ann && ann.id !== null) {
+         const idStr = ann.id.toString()
+         if (cleanActiveName === idStr) return true
+         const nameNum = cleanActiveName.match(/\d+$/)?.[0]
+         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true
+      }
+      return false
+    })
+    
+    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null
+    if (annotationData && annotationData.width && annotationData.height) {
+      return `0 0 ${annotationData.width} ${annotationData.height}`
+    }
+    return img.width && img.height ? `0 0 ${img.width} ${img.height}` : undefined
+  }
+
+  const getBoxes = (img) => {
+    if (!img) return { boxes: [], labels: {} }
+    const currentAnnotations = viewerAnnotations()
+    const activeName = img.name.toLowerCase()
+    const simpleActiveName = img.name.split('/').pop().toLowerCase()
+    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "")
+    
+    const foundKey = Object.keys(currentAnnotations.images).find(k => {
+      const kn = k.toLowerCase()
+      if (kn === activeName || kn === simpleActiveName) return true
+      const skn = k.split('/').pop().toLowerCase()
+      if (skn === simpleActiveName) return true
+      const ckn = skn.replace(/\.[^/.]+$/, "")
+      if (ckn === cleanActiveName) return true
+      
+      const ann = currentAnnotations.images[k]
+      if (ann && ann.id !== null) {
+         const idStr = ann.id.toString()
+         if (cleanActiveName === idStr) return true
+         const nameNum = cleanActiveName.match(/\d+$/)?.[0]
+         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true
+      }
+      return false
+    })
+    
+    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null
+    return {
+      boxes: annotationData?.boxes || [],
+      labels: currentAnnotations.labels
+    }
+  }
+
+  const getAnnotationIdText = (img) => {
+    if (!img) return 'No ID'
+    const currentAnnotations = viewerAnnotations()
+    const activeName = img.name.toLowerCase()
+    const simpleActiveName = img.name.split('/').pop().toLowerCase()
+    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "")
+    
+    const foundKey = Object.keys(currentAnnotations.images).find(k => {
+      const kn = k.toLowerCase()
+      if (kn === activeName || kn === simpleActiveName) return true
+      const skn = k.split('/').pop().toLowerCase()
+      if (skn === simpleActiveName) return true
+      const ckn = skn.replace(/\.[^/.]+$/, "")
+      if (ckn === cleanActiveName) return true
+      
+      const ann = currentAnnotations.images[k]
+      if (ann && ann.id !== null) {
+         const idStr = ann.id.toString()
+         if (cleanActiveName === idStr) return true
+         const nameNum = cleanActiveName.match(/\d+$/)?.[0]
+         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true
+      }
+      return false
+    })
+    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null
+    return annotationData ? `ID: ${annotationData.id}` : 'No ID'
+  }
+
+  return (
+    <main class="viewer-shell" style={{ position: 'relative', overflow: 'hidden' }}>
+      <Show when={showReloadPrompt()}>
+        <div class="reload-overlay" style={{
+          position: 'fixed',
+          top: '20px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          "z-index": 1000,
+          width: 'min(600px, 90%)',
+          padding: '16px',
+          background: 'rgba(20, 30, 45, 0.95)',
+          "border-radius": '12px',
+          border: '1px solid rgba(255,255,255,0.2)',
+          display: 'flex',
+          "align-items": 'center',
+          "justify-content": 'space-between',
+          gap: '16px',
+          "box-shadow": '0 10px 30px rgba(0,0,0,0.5)',
+          "backdrop-filter": 'blur(10px)'
+        }}>
+          <div style={{ "text-align": 'left' }}>
+            <strong style={{ display: 'block', color: 'white' }}>Cần nạp lại dữ liệu ảnh!</strong>
+            <span style={{ "font-size": '0.85em', color: 'rgba(255,255,255,0.7)' }}>Tab chính đã đóng hoặc dữ liệu cũ hết hạn. Bấm để khôi phục.</span>
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button type="button" class="primary-btn" onClick={reloadFolder} style={{ padding: '8px 16px', "font-size": '0.9em' }}>
+              Tải lại
+            </button>
+            <button type="button" class="ghost-btn" onClick={skipReload} style={{ padding: '8px 16px', "font-size": '0.9em' }}>
+              Bỏ qua
+            </button>
+          </div>
+        </div>
+      </Show>
+      
+      <section class="viewer-panel">
+        <Show
+          when={activeImage()}
+          fallback={
+            <div class="empty-gallery">
+              <h3>Tab preview chưa có dữ liệu ảnh</h3>
+              <p>Quay lại tab chính và bấm vào một ảnh để nạp danh sách vào đây.</p>
+            </div>
+          }
+        >
+          {(img) => (
+            <>
+              <div
+                ref={handleStageRef}
+                class="viewer-stage"
+                style={{ cursor: viewerTx().scale > 1 ? 'grab' : 'default' }}
+                onMouseDown={handleViewerMouseDown}
+                onMouseMove={handleViewerMouseMove}
+                onMouseUp={handleViewerMouseUp}
+                onMouseLeave={handleViewerMouseUp}
+                onDblClick={handleViewerDoubleClick}
+              >
+                <div
+                  class="viewer-image-container"
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    transform: `translate(${viewerTx().panX}px, ${viewerTx().panY}px) scale(${viewerTx().scale})`,
+                    "transform-origin": '0 0',
+                    width: displayedImage()?.width ? `${displayedImage().width}px` : 'auto',
+                    height: displayedImage()?.height ? `${displayedImage().height}px` : 'auto',
+                  }}
+                >
+                  <img
+                    src={image1Url()}
+                    alt={displayedImage()?.name}
+                    onLoad={(e) => {
+                      handleViewerImageLoad(e)
+                      if (activeBuffer() === 2 && image1Url() === extractedUrls()[viewerIndex()]) {
+                        setDisplayedViewerIndex(viewerIndex())
+                        setActiveBuffer(1)
+                      }
+                    }}
+                    class="viewer-image"
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: '100%',
+                      opacity: activeBuffer() === 1 ? 1 : 0,
+                      "pointer-events": activeBuffer() === 1 ? 'auto' : 'none',
+                      display: image1Url() ? 'block' : 'none',
+                    }}
+                  />
+                  <img
+                    src={image2Url()}
+                    alt={displayedImage()?.name}
+                    onLoad={(e) => {
+                      handleViewerImageLoad(e)
+                      if (activeBuffer() === 1 && image2Url() === extractedUrls()[viewerIndex()]) {
+                        setDisplayedViewerIndex(viewerIndex())
+                        setActiveBuffer(2)
+                      }
+                    }}
+                    class="viewer-image"
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: '100%',
+                      opacity: activeBuffer() === 2 ? 1 : 0,
+                      "pointer-events": activeBuffer() === 2 ? 'auto' : 'none',
+                      display: image2Url() ? 'block' : 'none',
+                    }}
+                  />
+                  <Show when={!extractedUrls()[viewerIndex()] && !image1Url() && !image2Url()}>
+                    <div style={{ display: 'flex', "align-items": 'center', "justify-content": 'center', width: '100%', height: '100%', "min-height": '300px' }}>
+                      <span class="loading-spinner" />
+                    </div>
+                  </Show>
+                  
+                  <Show when={showBoxes()}>
+                    <svg
+                      class="viewer-annotations"
+                      viewBox={getAnnotationViewBox(displayedImage())}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        height: '100%',
+                        "pointer-events": 'none',
+                      }}
+                    >
+                      {(() => {
+                        const data = getBoxes(displayedImage())
+                        return (
+                          <For each={data.boxes}>
+                            {(box) => {
+                              const labelColor = data.labels[box.label] || '#ff0000'
+                              return (
+                                <g>
+                                  <rect
+                                    x={box.xtl}
+                                    y={box.ytl}
+                                    width={box.xbr - box.xtl}
+                                    height={box.ybr - box.ytl}
+                                    fill="transparent"
+                                    stroke={labelColor}
+                                    stroke-width={2 / viewerTx().scale}
+                                  />
+                                  <text
+                                    x={box.xtl}
+                                    y={box.ytl - 2 / viewerTx().scale}
+                                    fill="#ffffff"
+                                    style={{
+                                      "font-size": `${12 / viewerTx().scale}px`,
+                                      "font-weight": 'bold',
+                                      "paint-order": 'stroke',
+                                      stroke: labelColor,
+                                      "stroke-width": `${3 / viewerTx().scale}px`,
+                                      "dominant-baseline": 'text-after-edge'
+                                    }}
+                                  >
+                                    {box.label}
+                                  </text>
+                                </g>
+                              )
+                            }}
+                          </For>
+                        )
+                      })()}
+                    </svg>
+                  </Show>
+                </div>
+              </div>
+
+              <div class="viewer-meta" style={{ display: 'flex', "align-items": 'center', gap: '8px', "flex-wrap": 'wrap', "justify-content": 'center' }}>
+                <input
+                  ref={searchInput}
+                  type="text"
+                  value={searchQuery()}
+                  onInput={(e) => {
+                    const query = e.target.value.trim()
+                    setSearchQuery(query)
+                    if (!query) return
+
+                    const displayList = viewerImages()
+                    const currentAnns = viewerAnnotations()
+                    let foundIndex = -1
+
+                    const isNumeric = /^\d+$/.test(query)
+                    if (isNumeric) {
+                      const foundKey = Object.keys(currentAnns.images).find(k => {
+                        const ann = currentAnns.images[k]
+                        return ann && ann.id !== null && ann.id.toString() === query
+                      })
+
+                      if (foundKey) {
+                        const cleanKey = foundKey.toLowerCase().split('/').pop()
+                        foundIndex = displayList.findIndex(item => {
+                          const imgName = item.name.toLowerCase()
+                          return imgName === foundKey.toLowerCase() || imgName.endsWith(cleanKey)
+                        })
+                      }
+                    }
+
+                    if (foundIndex === -1) {
+                      foundIndex = displayList.findIndex(item => 
+                        item.name.toLowerCase().includes(query.toLowerCase())
+                      )
+                    }
+
+                    if (foundIndex !== -1 && foundIndex !== viewerIndex()) {
+                      setViewerIndex(foundIndex)
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === 'Escape') {
+                      e.target.blur()
+                    }
+                  }}
+                  onFocus={() => setSearchQuery('')}
+                  onBlur={() => {
+                    const displayList = viewerImages()
+                    if (displayList[viewerIndex()]) {
+                      setSearchQuery(displayList[viewerIndex()].name)
+                    }
+                  }}
+                  style={{
+                    background: 'rgba(0, 0, 0, 0.5)',
+                    border: '1px solid rgba(255, 255, 255, 0.2)',
+                    color: '#fff',
+                    padding: '4px 8px',
+                    "border-radius": '4px',
+                    outline: 'none',
+                    "min-width": '300px',
+                    "font-family": 'inherit',
+                    "font-size": 'inherit'
+                  }}
+                  placeholder="Dán hoặc nhập tên ảnh để tìm..."
+                  title="Tìm kiếm tên ảnh"
+                />
+                <button
+                  class={`box-toggle-btn ${showBoxes() ? 'active' : ''}`}
+                  onClick={() => setShowBoxes(!showBoxes())}
+                  title={showBoxes() ? "Ẩn các box annotation" : "Hiện các box annotation"}
+                >
+                  {showBoxes() ? 'Hide Boxes' : 'Show Boxes'}
+                </button>
+                <span>
+                  • {viewerIndex() + 1}/{viewerImages().length} 
+                  <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
+                  {getAnnotationIdText(displayedImage())}
+                  <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
+                  {displayedImage()?.width || 0} x {displayedImage()?.height || 0} • Zoom {Math.round(viewerTx().scale * 100)}% • ← → để chuyển
+                </span>
+              </div>
+            </>
+          )}
+        </Show>
+      </section>
+    </main>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. MAIN PAGE COMPONENT
+// ─────────────────────────────────────────────────────────────────────────────
+function MainPage(props) {
+  const [images, setImages] = createSignal([])
+  const [isLoading, setIsLoading] = createSignal(false)
+  const [loadDone, setLoadDone] = createSignal(false)
+  const [hasSavedFolder, setHasSavedFolder] = createSignal(false)
+  const [showReloadPrompt, setShowReloadPrompt] = createSignal(false)
+  const [zipEntries, setZipEntries] = createSignal(null)
+  const [annotations, setAnnotations] = createSignal({ labels: {}, images: {} })
+  
+  let channel = null
+
+  onMount(() => {
+    document.title = 'Preview'
+    window.name = 'image-preview-main'
+
+    // BroadcastChannel for cross-tab communication (Main side)
+    channel = new BroadcastChannel('image-view-channel')
+
+    onCleanup(() => {
+      if (channel) channel.close()
+    })
+  })
+
+  // Listen to channel messages for image request
+  createEffect(() => {
+    const currentZipEntries = zipEntries()
+    if (channel) {
+      channel.onmessage = async (e) => {
+        if (e.data.type === 'REQ_IMG' && currentZipEntries) {
+          const entry = currentZipEntries[e.data.name]
+          if (entry) {
+            try {
+              const blob = await entry.blob()
+              channel.postMessage({ type: 'RES_IMG', idx: e.data.idx, blob })
+            } catch (err) {
+              console.error('Lỗi khi đọc blob qua channel:', err)
+            }
+          }
+        }
+      }
+    }
+  })
+
+  // Restore folder handle if available
+  onMount(() => {
+    getFolderHandle().then(async (handle) => {
+      if (handle) {
+        setHasSavedFolder(true)
+        if (images().length === 0) {
+          setShowReloadPrompt(true)
+        }
+      }
+    }).catch(() => { })
+  })
+
+  // Top Navbar action helpers
+  async function reloadFolder() {
+    setShowReloadPrompt(false)
+    try {
+      const handle = await getFolderHandle()
+      if (!handle) return
+      const perm = await handle.queryPermission({ mode: 'read' })
+      if (perm !== 'granted') {
+        const req = await handle.requestPermission({ mode: 'read' })
+        if (req !== 'granted') return
+      }
+      await readZipHandle(handle)
+    } catch (err) {
+      console.error(err)
+    }
+  }
 
   async function readZipHandle(fileHandle) {
     setIsLoading(true)
-    setExtractedUrls(current => {
-      Object.values(current).forEach(url => URL.revokeObjectURL(url));
-      return {};
-    });
     setImages([])
     setAnnotations({ labels: {}, images: {} })
     try {
@@ -954,7 +1050,7 @@ export default function App() {
         }
       }
 
-      let parsedAnnotations = { labels: {}, images: {} };
+      let parsedAnnotations = { labels: {}, images: {} }
       if (annFileContent) {
         parsedAnnotations = parseAnnotations(annFileContent)
         setAnnotations(parsedAnnotations)
@@ -963,15 +1059,16 @@ export default function App() {
       imageData.sort((a, b) => a.name.localeCompare(b.name))
 
       const nextRecords = imageData.map((data, index) => {
-        const ann = parsedAnnotations.images[data.name] || parsedAnnotations.images[data.name.split('/').pop()] || {};
+        const ann = parsedAnnotations.images[data.name] || parsedAnnotations.images[data.name.split('/').pop()] || {}
         return {
           id: `${data.name}-${index}`,
           name: data.name,
           width: ann.width || 0,
           height: ann.height || 0,
-          url: '', // dynamic
+          url: '',
         }
       })
+      
       startTransition(() => {
         setImages(nextRecords)
       })
@@ -998,10 +1095,6 @@ export default function App() {
   }
 
   async function clearImages() {
-    setExtractedUrls(current => {
-      Object.values(current).forEach(url => URL.revokeObjectURL(url));
-      return {};
-    });
     setImages([])
     setAnnotations({ labels: {}, images: {} })
     await clearFolderHandle()
@@ -1014,136 +1107,136 @@ export default function App() {
     setHasSavedFolder(false)
   }
 
-  function removeImage(imageId) {
-    setImages((current) => {
-      const imageToRemove = current.find((image) => image.id === imageId)
-      if (imageToRemove) {
-        URL.revokeObjectURL(imageToRemove.url)
-      }
+  function openImageInNewTab(image) {
+    const snapshot = images().map((currentImage) => ({
+      id: currentImage.id,
+      name: currentImage.name,
+      width: currentImage.width,
+      height: currentImage.height,
+    }))
 
-      return current.filter((image) => image.id !== imageId)
-    })
-  }
+    const currentIndex = snapshot.findIndex((item) => item.id === image.id)
+    if (currentIndex < 0) return
 
-  function handleThumbnailLoad(imageId, event) {
-    const { naturalWidth, naturalHeight } = event.target
-    if (!naturalWidth) return
-    setImages((current) =>
-      current.map((img) =>
-        img.id === imageId ? { ...img, width: naturalWidth, height: naturalHeight } : img
+    try {
+      localStorage.setItem(
+        VIEWER_STATE_KEY,
+        JSON.stringify({
+          images: snapshot,
+          selectedImageId: image.id,
+          savedAt: Date.now(),
+        }),
       )
-    )
-  }
-
-  function handleViewerImageLoad(event) {
-    const { naturalWidth, naturalHeight } = event.target
-    if (!naturalWidth) return
-    const displayImages = images.length > 0 ? images : viewerImages
-    const activeImage = displayImages[Math.min(Math.max(viewerIndex, 0), displayImages.length - 1)]
-    if (!activeImage || (activeImage.width === naturalWidth && activeImage.height === naturalHeight)) return
-
-    if (images.length > 0) {
-      setImages((current) =>
-        current.map((img) =>
-          img.id === activeImage.id ? { ...img, width: naturalWidth, height: naturalHeight } : img
-        )
+      // Save annotations to local storage too
+      localStorage.setItem(
+        'local-image-viewer-annotations',
+        JSON.stringify(annotations())
       )
+    } catch (err) {
+      console.warn('Không thể lưu trạng thái preview vào localStorage:', err)
+    }
+
+    const viewerUrl = `${window.location.pathname}?viewer=1&index=${currentIndex}`
+    const newTab = window.open(viewerUrl, PREVIEW_TAB_NAME)
+    if (newTab) {
+      newTab.focus()
     } else {
-      setViewerImages((current) =>
-        current.map((img) =>
-          img.id === activeImage.id ? { ...img, width: naturalWidth, height: naturalHeight } : img
-        )
-      )
+      console.warn('Popup bị chặn hoặc không mở được tab mới, chuyển về cùng một tab')
+      window.location.assign(viewerUrl)
     }
   }
 
   return (
-    <div className="app-shell">
-      <div className="bg-orb bg-orb-left" />
-      <div className="bg-orb bg-orb-right" />
+    <div class="app-shell">
+      <div class="bg-orb bg-orb-left" />
+      <div class="bg-orb bg-orb-right" />
 
-      <main className="page">
+      <main class="page">
         {/* ─── TOP NAVBAR ─── */}
-        <header className="hero-panel">
-          {/* Brand */}
-          <div className="navbar-brand">
-            <div className="brand-dot" />
+        <header class="hero-panel">
+          <div class="navbar-brand">
+            <div class="brand-dot" />
             <span>ImageView</span>
           </div>
 
-          {/* Navbar actions: always visible, Xóa only when file loaded */}
-          <div className="hero-actions" style={{ margin: 0 }}>
-            <button type="button" className="primary-btn" onClick={openZipPicker} style={{ padding: '0.5rem 1.2rem', fontSize: '0.85rem' }}>
+          <div class="hero-actions" style={{ margin: 0 }}>
+            <button type="button" class="primary-btn" onClick={openZipPicker} style={{ padding: '0.5rem 1.2rem', "font-size": '0.85rem' }}>
               ＋ Chọn file ZIP
             </button>
-            {(images.length > 0 || hasSavedFolder) && (
-              <button type="button" className="ghost-btn" onClick={clearImages} style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}>
+            <Show when={images().length > 0 || hasSavedFolder()}>
+              <button type="button" class="ghost-btn" onClick={clearImages} style={{ padding: '0.5rem 1rem', "font-size": '0.85rem' }}>
                 Xóa tất cả
               </button>
-            )}
+            </Show>
           </div>
 
-          {/* Right: stats */}
-          <div className="hero-stats">
-            {images.length > 0 && (
+          <div class="hero-stats">
+            <Show when={images().length > 0}>
               <article>
-                <span>{images.length}</span>
+                <span>{images().length}</span>
                 <p>ảnh</p>
               </article>
-            )}
-            {isLoading ? (
-              <span className="loading-spinner" style={{ width: 20, height: 20, borderWidth: 2 }} />
-            ) : loadDone && images.length > 0 ? (
-              <span className="stat-ok-badge">Sẵn sàng</span>
-            ) : null}
+            </Show>
+            <Show
+              when={isLoading()}
+              fallback={
+                <Show when={loadDone() && images().length > 0}>
+                  <span class="stat-ok-badge">Sẵn sàng</span>
+                </Show>
+              }
+            >
+              <span class="loading-spinner" style={{ width: '20px', height: '20px', "border-width": '2px' }} />
+            </Show>
           </div>
         </header>
 
         {/* ─── RELOAD PROMPT ─── */}
-        {showReloadPrompt && (
+        <Show when={showReloadPrompt()}>
           <div style={{
             margin: '0',
             padding: '12px 2rem',
             background: 'rgba(255, 165, 50, 0.08)',
-            borderBottom: '1px solid rgba(255, 165, 50, 0.2)',
+            "border-bottom": '1px solid rgba(255, 165, 50, 0.2)',
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
+            "align-items": 'center',
+            "justify-content": 'space-between',
             gap: '16px'
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span style={{ fontSize: '1rem' }}>💾</span>
+            <div style={{ display: 'flex', "align-items": 'center', gap: '10px' }}>
+              <span style={{ "font-size": '1rem' }}>💾</span>
               <div>
-                <strong style={{ display: 'block', color: '#ffcf91', fontSize: '0.88rem' }}>Phát hiện dữ liệu ZIP cũ!</strong>
-                <span style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.5)' }}>Bạn có muốn khôi phục lại file ZIP này không?</span>
+                <strong style={{ display: 'block', color: '#ffcf91', "font-size": '0.88rem' }}>Phát hiện dữ liệu ZIP cũ!</strong>
+                <span style={{ "font-size": '0.8rem', color: 'rgba(255,255,255,0.5)' }}>Bạn có muốn khôi phục lại file ZIP này không?</span>
               </div>
             </div>
-            <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
-              <button type="button" className="primary-btn" onClick={reloadFolder} style={{ padding: '0.4rem 1rem', fontSize: '0.82rem' }}>
+            <div style={{ display: 'flex', gap: '8px', "flex-shrink": 0 }}>
+              <button type="button" class="primary-btn" onClick={reloadFolder} style={{ padding: '0.4rem 1rem', "font-size": '0.82rem' }}>
                 Khôi phục
               </button>
-              <button type="button" className="ghost-btn" onClick={skipReload} style={{ padding: '0.4rem 0.9rem', fontSize: '0.82rem' }}>
+              <button type="button" class="ghost-btn" onClick={skipReload} style={{ padding: '0.4rem 0.9rem', "font-size": '0.82rem' }}>
                 Bỏ qua
               </button>
             </div>
           </div>
-        )}
+        </Show>
 
         {/* ─── DASHBOARD ─── */}
-        <section className="gallery-panel">
-          {!images.length ? (
-            /* Empty state */
-            <div className="dash-empty">
-              <div className="dash-empty-icon">📦</div>
-              <h3>Chưa có file nào được mở</h3>
-              <p>Nhấn <strong>＋ Chọn file ZIP</strong> ở trên để bắt đầu</p>
-            </div>
-          ) : (
-            <div className="dashboard">
+        <section class="gallery-panel">
+          <Show
+            when={images().length > 0}
+            fallback={
+              <div class="dash-empty">
+                <div class="dash-empty-icon">📦</div>
+                <h3>Chưa có file nào được mở</h3>
+                <p>Nhấn <strong>＋ Chọn file ZIP</strong> ở trên để bắt đầu</p>
+              </div>
+            }
+          >
+            <div class="dashboard">
               {/* ─── OPEN PREVIEW - CTA ─── */}
-              <div className="dash-launch">
-                <div className="dash-launch-info">
-                  <div className="dash-launch-icon">🎬</div>
+              <div class="dash-launch">
+                <div class="dash-launch-info">
+                  <div class="dash-launch-icon">🎬</div>
                   <div>
                     <strong>Mở Preview Viewer</strong>
                     <span>Xem và điều hướng ảnh từ file ZIP trong cửa sổ riêng</span>
@@ -1151,98 +1244,125 @@ export default function App() {
                 </div>
                 <button
                   type="button"
-                  className="dash-open-btn"
-                  onClick={() => openImageInNewTab(images[0])}
-                  disabled={!images.length}
+                  class="dash-open-btn"
+                  onClick={() => openImageInNewTab(images()[0])}
+                  disabled={!images().length}
                 >
-                  <span className="dash-open-icon">▶</span>
+                  <span class="dash-open-icon">▶</span>
                   Mở Preview
                 </button>
               </div>
 
               {/* ─── STATS GRID ─── */}
-              <div className="dash-stats">
-                <div className="dash-stat-card">
-                  <div className="dash-stat-icon">🖼</div>
-                  <div className="dash-stat-body">
-                    <span className="dash-stat-value">{images.length.toLocaleString()}</span>
-                    <span className="dash-stat-label">Tổng số ảnh</span>
+              <div class="dash-stats">
+                <div class="dash-stat-card">
+                  <div class="dash-stat-icon">🖼</div>
+                  <div class="dash-stat-body">
+                    <span class="dash-stat-value">{images().length.toLocaleString()}</span>
+                    <span class="dash-stat-label">Tổng số ảnh</span>
                   </div>
                 </div>
 
-                <div className="dash-stat-card">
-                  <div className="dash-stat-icon">📁</div>
-                  <div className="dash-stat-body">
-                    <span className="dash-stat-value">
+                <div class="dash-stat-card">
+                  <div class="dash-stat-icon">📁</div>
+                  <div class="dash-stat-body">
+                    <span class="dash-stat-value">
                       {(() => {
-                        const folders = new Set(images.map(img => {
-                          const parts = img.name.split('/');
-                          parts.pop();
-                          return parts.join('/') || '/';
-                        }));
-                        return folders.size;
+                        const folders = new Set(images().map(img => {
+                          const parts = img.name.split('/')
+                          parts.pop()
+                          return parts.join('/') || '/'
+                        }))
+                        return folders.size
                       })()}
                     </span>
-                    <span className="dash-stat-label">Thư mục</span>
+                    <span class="dash-stat-label">Thư mục</span>
                   </div>
                 </div>
 
-                <div className="dash-stat-card">
-                  <div className="dash-stat-icon">✅</div>
-                  <div className="dash-stat-body">
-                    <span className="dash-stat-value" style={{ color: 'var(--success)' }}>
-                      {loadDone ? 'Sẵn sàng' : isLoading ? 'Đang nạp...' : '—'}
+                <div class="dash-stat-card">
+                  <div class="dash-stat-icon">✅</div>
+                  <div class="dash-stat-body">
+                    <span class="dash-stat-value" style={{ color: 'var(--success)' }}>
+                      {loadDone() ? 'Sẵn sàng' : isLoading() ? 'Đang nạp...' : '—'}
                     </span>
-                    <span className="dash-stat-label">Trạng thái</span>
+                    <span class="dash-stat-label">Trạng thái</span>
                   </div>
                 </div>
 
-                <div className="dash-stat-card">
-                  <div className="dash-stat-icon">🔖</div>
-                  <div className="dash-stat-body">
-                    <span className="dash-stat-value">
-                      {Object.keys(annotations.labels).length > 0
-                        ? Object.keys(annotations.labels).length
+                <div class="dash-stat-card">
+                  <div class="dash-stat-icon">🔖</div>
+                  <div class="dash-stat-body">
+                    <span class="dash-stat-value">
+                      {Object.keys(annotations().labels).length > 0
+                        ? Object.keys(annotations().labels).length
                         : '—'}
                     </span>
-                    <span className="dash-stat-label">Label</span>
+                    <span class="dash-stat-label">Label</span>
                   </div>
                 </div>
               </div>
 
               {/* ─── FILE INFO ─── */}
-              <div className="dash-info-row">
-                <div className="dash-info-card">
-                  <span className="dash-info-label">📦 Nguồn dữ liệu</span>
-                  <span className="dash-info-value">ZIP Archive (File System Access API)</span>
+              <div class="dash-info-row">
+                <div class="dash-info-card">
+                  <span class="dash-info-label">📦 Nguồn dữ liệu</span>
+                  <span class="dash-info-value">ZIP Archive (File System Access API)</span>
                 </div>
-                <div className="dash-info-card">
-                  <span className="dash-info-label">🖼 Ảnh đầu tiên</span>
-                  <span className="dash-info-value">{images[0]?.name.split('/').pop() ?? '—'}</span>
+                <div class="dash-info-card">
+                  <span class="dash-info-label">🖼 Ảnh đầu tiên</span>
+                  <span class="dash-info-value">{images()[0]?.name.split('/').pop() ?? '—'}</span>
                 </div>
-                <div className="dash-info-card">
-                  <span className="dash-info-label">🖼 Ảnh cuối cùng</span>
-                  <span className="dash-info-value">{images[images.length - 1]?.name.split('/').pop() ?? '—'}</span>
+                <div class="dash-info-card">
+                  <span class="dash-info-label">🖼 Ảnh cuối cùng</span>
+                  <span class="dash-info-value">{images()[images().length - 1]?.name.split('/').pop() ?? '—'}</span>
                 </div>
               </div>
 
               {/* ─── SHORTCUTS ─── */}
-              <div className="dash-shortcuts">
-                <p className="dash-shortcuts-title">⌨️ Phím tắt trong Viewer</p>
-                <div className="dash-shortcuts-grid">
-                  <div className="dash-shortcut"><kbd>F</kbd> / <kbd>→</kbd><span>Ảnh tiếp theo</span></div>
-                  <div className="dash-shortcut"><kbd>D</kbd> / <kbd>←</kbd><span>Ảnh trước</span></div>
-                  <div className="dash-shortcut"><kbd>Cuộn chuột</kbd><span>Zoom in/out</span></div>
-                  <div className="dash-shortcut"><kbd>Click giữ</kbd><span>Di chuyển ảnh</span></div>
-                  <div className="dash-shortcut"><kbd>Ctrl+F</kbd><span>Tìm kiếm theo ID</span></div>
-                  <div className="dash-shortcut"><kbd>Double-click</kbd><span>Fit về kích thước gốc</span></div>
+              <div class="dash-shortcuts">
+                <p class="dash-shortcuts-title">⌨️ Phím tắt trong Viewer</p>
+                <div class="dash-shortcuts-grid">
+                  <div class="dash-shortcut"><kbd>F</kbd> / <kbd>→</kbd><span>Ảnh tiếp theo</span></div>
+                  <div class="dash-shortcut"><kbd>D</kbd> / <kbd>←</kbd><span>Ảnh trước</span></div>
+                  <div class="dash-shortcut"><kbd>Cuộn chuột</kbd><span>Zoom in/out</span></div>
+                  <div class="dash-shortcut"><kbd>Click giữ</kbd><span>Di chuyển ảnh</span></div>
+                  <div class="dash-shortcut"><kbd>Ctrl+F</kbd><span>Tìm kiếm theo ID</span></div>
+                  <div class="dash-shortcut"><kbd>Double-click</kbd><span>Fit về kích thước gốc</span></div>
                 </div>
               </div>
             </div>
-          )}
+          </Show>
         </section>
       </main>
-
     </div>
   )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. MAIN ROUTER
+// ─────────────────────────────────────────────────────────────────────────────
+export default function App() {
+  // Bust cache
+  onMount(() => {
+    const currentBuild = typeof __BUILD_DATE__ !== 'undefined' ? __BUILD_DATE__ : null
+    if (currentBuild) {
+      const lastBuild = localStorage.getItem('last_build_date')
+      if (lastBuild && lastBuild !== String(currentBuild)) {
+        console.log("New build detected! Reloading to clear cache...")
+        localStorage.setItem('last_build_date', String(currentBuild))
+        window.location.reload(true)
+      } else {
+        localStorage.setItem('last_build_date', String(currentBuild))
+      }
+    }
+  })
+
+  const initialRouteState = getViewerRouteState()
+
+  if (initialRouteState.isViewer) {
+    return <ViewerPage initialRouteState={initialRouteState} />
+  } else {
+    return <MainPage initialRouteState={initialRouteState} />
+  }
 }

@@ -1,8 +1,8 @@
 import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import solidPlugin from 'vite-plugin-solid'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [solidPlugin()],
   define: {
     __BUILD_DATE__: Date.now(),
   },
@@ -12,6 +12,6 @@ export default defineConfig({
   },
   worker: {
     format: 'es',
-    plugins: () => [react()]
+    plugins: () => [solidPlugin()]
   }
 })
