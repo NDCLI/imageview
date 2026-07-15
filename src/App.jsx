@@ -87,6 +87,16 @@ function readViewerImagesFromStorage() {
   }
 }
 
+function readExtractAllFromStorage() {
+  try {
+    const raw = localStorage.getItem(VIEWER_STATE_KEY)
+    if (raw) {
+      return !!JSON.parse(raw).isExtractAll
+    }
+  } catch {}
+  return false
+}
+
 function writeViewerIndexToUrl(index) {
   const params = new URLSearchParams(window.location.search)
   params.set('viewer', '1')
@@ -99,6 +109,7 @@ function writeViewerIndexToUrl(index) {
 // ─────────────────────────────────────────────────────────────────────────────
 function ViewerPage(props) {
   const [viewerImages, setViewerImages] = createSignal(readViewerImagesFromStorage())
+  const [extractAllMode, setExtractAllMode] = createSignal(readExtractAllFromStorage())
   const [viewerIndex, setViewerIndex] = createSignal(props.initialRouteState.index)
   const [searchQuery, setSearchQuery] = createSignal('')
   const [viewerTx, setViewerTx] = createSignal({ scale: 1, panX: 0, panY: 0 })
@@ -128,6 +139,16 @@ function ViewerPage(props) {
     // If the target URL is already loaded and active, we just sync displayedViewerIndex immediately
     if (url === activeUrl) {
       setDisplayedViewerIndex(viewerIndex())
+      return
+    }
+
+    const inactiveUrl = currentActive === 1 ? image2Url() : image1Url()
+    
+    // If the target URL is already in the inactive buffer, it won't fire onLoad again.
+    // So we can just swap buffers and sync index immediately.
+    if (url === inactiveUrl) {
+      setDisplayedViewerIndex(viewerIndex())
+      setActiveBuffer(currentActive === 1 ? 2 : 1)
       return
     }
 
@@ -220,6 +241,7 @@ function ViewerPage(props) {
             return
           }
           const zipFile = await handle.getFile()
+          setExtractAllMode(zipFile.size < 1024 * 1024 * 1024)
           const { entries } = await unzip(zipFile)
           setZipEntries(entries)
           
@@ -256,69 +278,99 @@ function ViewerPage(props) {
     let timer
 
     untrack(() => {
-      const neighborRange = new Set()
-      for (let offset = -2; offset <= 2; offset++) {
-        const idx = activeIdx + offset
-        if (idx >= 0 && idx < displayImages.length) {
-          neighborRange.add(idx)
-        }
-      }
+      const isExtractAll = extractAllMode()
 
-      // Clean up URLs out of neighbor range IMMEDIATELY
-      setExtractedUrls(prev => {
-        const nextUrls = { ...prev }
-        let changed = false
-        Object.keys(nextUrls).forEach(idxStr => {
-          const idx = parseInt(idxStr, 10)
-          if (!neighborRange.has(idx)) {
-            URL.revokeObjectURL(nextUrls[idx])
-            delete nextUrls[idx]
-            requestedImages.delete(idx)
-            changed = true
-          }
-        })
-        return changed ? nextUrls : prev
-      })
+      if (isExtractAll) {
+        const fetchImage = (idx) => {
+          if (requestedImages.has(idx) || extractedUrls()[idx]) return
+          const imgRecord = displayImages[idx]
+          if (!imgRecord) return
 
-      const fetchImage = (idx) => {
-        if (requestedImages.has(idx) || extractedUrls()[idx]) return
-        const imgRecord = displayImages[idx]
-        if (!imgRecord) return
-
-        const entries = zipEntries()
-        if (entries) {
-          const entry = entries[imgRecord.name]
-          if (entry) {
-            requestedImages.add(idx)
-            entry.blob().then(blob => {
-              const url = URL.createObjectURL(blob)
-              preDecodeUrl(url)
-              setExtractedUrls(current => {
-                if (neighborRange.has(idx) && !current[idx]) {
-                  return { ...current, [idx]: url }
-                } else {
-                  URL.revokeObjectURL(url)
-                  return current
-                }
+          const entries = zipEntries()
+          if (entries) {
+            const entry = entries[imgRecord.name]
+            if (entry) {
+              requestedImages.add(idx)
+              entry.blob().then(blob => {
+                const url = URL.createObjectURL(blob)
+                preDecodeUrl(url)
+                setExtractedUrls(current => ({ ...current, [idx]: url }))
               })
-            })
+            }
+          } else if (channel) {
+            requestedImages.add(idx)
+            channel.postMessage({ type: 'REQ_IMG', idx, name: imgRecord.name })
           }
-        } else if (channel) {
-          requestedImages.add(idx)
-          channel.postMessage({ type: 'REQ_IMG', idx, name: imgRecord.name })
         }
-      }
 
-      fetchImage(activeIdx)
+        displayImages.forEach((_, idx) => fetchImage(idx))
+      } else {
+        const neighborRange = new Set()
+        for (let offset = -2; offset <= 2; offset++) {
+          const idx = activeIdx + offset
+          if (idx >= 0 && idx < displayImages.length) {
+            neighborRange.add(idx)
+          }
+        }
 
-      timer = setTimeout(() => {
-        neighborRange.forEach(idx => {
-          if (idx !== activeIdx) fetchImage(idx)
+        // Clean up URLs out of neighbor range IMMEDIATELY
+        setExtractedUrls(prev => {
+          const nextUrls = { ...prev }
+          let changed = false
+          Object.keys(nextUrls).forEach(idxStr => {
+            const idx = parseInt(idxStr, 10)
+            if (!neighborRange.has(idx)) {
+              URL.revokeObjectURL(nextUrls[idx])
+              delete nextUrls[idx]
+              requestedImages.delete(idx)
+              changed = true
+            }
+          })
+          return changed ? nextUrls : prev
         })
-      }, 150)
+
+        const fetchImage = (idx) => {
+          if (requestedImages.has(idx) || extractedUrls()[idx]) return
+          const imgRecord = displayImages[idx]
+          if (!imgRecord) return
+
+          const entries = zipEntries()
+          if (entries) {
+            const entry = entries[imgRecord.name]
+            if (entry) {
+              requestedImages.add(idx)
+              entry.blob().then(blob => {
+                const url = URL.createObjectURL(blob)
+                preDecodeUrl(url)
+                setExtractedUrls(current => {
+                  if (neighborRange.has(idx) && !current[idx]) {
+                    return { ...current, [idx]: url }
+                  } else {
+                    URL.revokeObjectURL(url)
+                    return current
+                  }
+                })
+              })
+            }
+          } else if (channel) {
+            requestedImages.add(idx)
+            channel.postMessage({ type: 'REQ_IMG', idx, name: imgRecord.name })
+          }
+        }
+
+        fetchImage(activeIdx)
+
+        timer = setTimeout(() => {
+          neighborRange.forEach(idx => {
+            if (idx !== activeIdx) fetchImage(idx)
+          })
+        }, 150)
+      }
     })
 
-    onCleanup(() => clearTimeout(timer))
+    onCleanup(() => {
+      if (timer) clearTimeout(timer)
+    })
   })
 
   // Listen to cross-tab storage changes
@@ -326,6 +378,7 @@ function ViewerPage(props) {
     function handleStorage(event) {
       if (event.key === VIEWER_STATE_KEY) {
         setViewerImages(readViewerImagesFromStorage())
+        setExtractAllMode(readExtractAllFromStorage())
       }
     }
     window.addEventListener('storage', handleStorage)
@@ -538,6 +591,7 @@ function ViewerPage(props) {
   async function readZipHandle(fileHandle) {
     try {
       const zipFile = await fileHandle.getFile()
+      setExtractAllMode(zipFile.size < 1024 * 1024 * 1024)
       const { entries } = await unzip(zipFile)
       setZipEntries(entries)
 
@@ -966,6 +1020,7 @@ function MainPage(props) {
   const [showReloadPrompt, setShowReloadPrompt] = createSignal(false)
   const [zipEntries, setZipEntries] = createSignal(null)
   const [annotations, setAnnotations] = createSignal({ labels: {}, images: {} })
+  const [extractAllMode, setExtractAllMode] = createSignal(false)
   
   let channel = null
 
@@ -1036,6 +1091,7 @@ function MainPage(props) {
     setAnnotations({ labels: {}, images: {} })
     try {
       const zipFile = await fileHandle.getFile()
+      setExtractAllMode(zipFile.size < 1024 * 1024 * 1024)
       const { entries } = await unzip(zipFile)
       setZipEntries(entries)
 
@@ -1125,6 +1181,7 @@ function MainPage(props) {
           images: snapshot,
           selectedImageId: image.id,
           savedAt: Date.now(),
+          isExtractAll: extractAllMode(),
         }),
       )
       // Save annotations to local storage too
