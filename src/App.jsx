@@ -201,7 +201,7 @@ function ViewerPage(props) {
   }
 
   onMount(() => {
-    document.title = 'Images Preview'
+    document.title = 'Image View'
     window.name = PREVIEW_TAB_NAME
 
     // BroadcastChannel for cross-tab communication (Viewer side)
@@ -1035,7 +1035,7 @@ function MainPage(props) {
   let channel = null
 
   onMount(() => {
-    document.title = 'Preview'
+    document.title = 'Image View'
     window.name = 'image-preview-main'
 
     // BroadcastChannel for cross-tab communication (Main side)
@@ -1301,23 +1301,23 @@ function MainPage(props) {
           >
             <div class="dashboard">
               {/* ─── OPEN PREVIEW - CTA ─── */}
-              <div class="dash-launch">
+              <div class="dash-launch" style={{ "justify-content": "flex-start" }}>
                 <div class="dash-launch-info">
                   <div class="dash-launch-icon">🎬</div>
-                  <div>
-                    <strong>Mở Preview Viewer</strong>
+                  <div style={{ display: 'flex', "flex-direction": 'column', gap: '6px', "align-items": 'flex-start' }}>
+                    <button
+                      type="button"
+                      class="dash-open-btn"
+                      onClick={() => openImageInNewTab(images()[0])}
+                      disabled={!images().length}
+                      style={{ padding: '0.6rem 1.5rem', "font-size": '0.9rem', "margin-bottom": '4px' }}
+                    >
+                      <span class="dash-open-icon">▶</span>
+                      Mở Image View
+                    </button>
                     <span>Xem và điều hướng ảnh từ file ZIP trong cửa sổ riêng</span>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  class="dash-open-btn"
-                  onClick={() => openImageInNewTab(images()[0])}
-                  disabled={!images().length}
-                >
-                  <span class="dash-open-icon">▶</span>
-                  Mở Preview
-                </button>
               </div>
 
               {/* ─── STATS GRID ─── */}
