@@ -1396,7 +1396,7 @@ function MainPage(props) {
 
               {/* ─── SHORTCUTS ─── */}
               <div class="dash-shortcuts">
-                <p class="dash-shortcuts-title">⌨️ Phím tắt trong Viewer</p>
+                <p class="dash-shortcuts-title">⌨️ Phím tắt</p>
                 <div class="dash-shortcuts-grid">
                   <div class="dash-shortcut"><kbd>F</kbd> / <kbd>→</kbd><span>Ảnh tiếp theo</span></div>
                   <div class="dash-shortcut"><kbd>D</kbd> / <kbd>←</kbd><span>Ảnh trước</span></div>
