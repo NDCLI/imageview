@@ -16,6 +16,14 @@ function parseAnnotations(xmlText) {
   const xmlDoc = parser.parseFromString(xmlText, 'text/xml')
   const labels = {}
   const images = {}
+  
+  const jobNode = xmlDoc.querySelector('meta > job > id')
+  const jobId = jobNode ? jobNode.textContent : ''
+  
+  const startFrameNode = xmlDoc.querySelector('meta > job > start_frame')
+  const stopFrameNode = xmlDoc.querySelector('meta > job > stop_frame')
+  const startFrame = startFrameNode ? startFrameNode.textContent : ''
+  const stopFrame = stopFrameNode ? stopFrameNode.textContent : ''
 
   // Parse labels/colors
   const labelNodes = xmlDoc.querySelectorAll('label')
@@ -46,7 +54,7 @@ function parseAnnotations(xmlText) {
     images[name] = { id, width, height, boxes }
   })
 
-  return { labels, images }
+  return { labels, images, jobId, startFrame, stopFrame }
 }
 
 function getFitState(imageWidth, imageHeight, stage) {
@@ -994,7 +1002,9 @@ function ViewerPage(props) {
                   {showBoxes() ? 'Hide Boxes' : 'Show Boxes'}
                 </button>
                 <span>
-                  • {viewerIndex() + 1}/{viewerImages().length} 
+                  • Job: {viewerAnnotations().jobId || 'N/A'}
+                  <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
+                  {viewerIndex() + 1}/{viewerImages().length} 
                   <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
                   {getAnnotationIdText(displayedImage())}
                   <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
@@ -1362,6 +1372,14 @@ function MainPage(props) {
 
               {/* ─── FILE INFO ─── */}
               <div class="dash-info-row">
+                <div class="dash-info-card">
+                  <span class="dash-info-label">🏢 Job ID</span>
+                  <span class="dash-info-value">{annotations().jobId || '—'}</span>
+                </div>
+                <div class="dash-info-card">
+                  <span class="dash-info-label">🎬 Frame</span>
+                  <span class="dash-info-value">{annotations().startFrame ? `${annotations().startFrame} - ${annotations().stopFrame}` : '—'}</span>
+                </div>
                 <div class="dash-info-card">
                   <span class="dash-info-label">📦 Nguồn dữ liệu</span>
                   <span class="dash-info-value">ZIP Archive (File System Access API)</span>
