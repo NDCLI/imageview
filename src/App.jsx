@@ -1,4 +1,4 @@
-import { createSignal, createEffect, onMount, onCleanup, Show, For, startTransition, untrack } from 'solid-js'
+import { createSignal, createEffect, createMemo, onMount, onCleanup, Show, For, startTransition, untrack } from 'solid-js'
 import { unzip } from 'unzipit'
 import { getFolderHandle, setFolderHandle, clearFolderHandle } from './storage'
 
@@ -55,6 +55,35 @@ function parseAnnotations(xmlText) {
   })
 
   return { labels, images, jobId, startFrame, stopFrame }
+}
+
+/**
+ * Find the annotation key matching an image record by name or numeric ID.
+ * Centralises the lookup that was duplicated across three helpers.
+ */
+function findAnnotationKey(img, annotationImages) {
+  if (!img) return null
+  const activeName = img.name.toLowerCase()
+  const simpleActiveName = img.name.split('/').pop().toLowerCase()
+  const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "")
+
+  return Object.keys(annotationImages).find(k => {
+    const kn = k.toLowerCase()
+    if (kn === activeName || kn === simpleActiveName) return true
+    const skn = k.split('/').pop().toLowerCase()
+    if (skn === simpleActiveName) return true
+    const ckn = skn.replace(/\.[^/.]+$/, "")
+    if (ckn === cleanActiveName) return true
+
+    const ann = annotationImages[k]
+    if (ann && ann.id !== null) {
+      const idStr = ann.id.toString()
+      if (cleanActiveName === idStr) return true
+      const nameNum = cleanActiveName.match(/\d+$/)?.[0]
+      if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true
+    }
+    return false
+  }) || null
 }
 
 function getFitState(imageWidth, imageHeight, stage) {
@@ -385,6 +414,7 @@ function ViewerPage(props) {
   onMount(() => {
     function handleStorage(event) {
       if (event.key === VIEWER_STATE_KEY) {
+        requestedImages.clear()
         setViewerImages(readViewerImagesFromStorage())
         setExtractAllMode(readExtractAllFromStorage())
       }
@@ -627,15 +657,19 @@ function ViewerPage(props) {
   function handleViewerImageLoad(event) {
     const { naturalWidth, naturalHeight } = event.target
     if (!naturalWidth) return
-    
-    // Guard against race conditions when loading fast
-    const targetUrl = extractedUrls()[viewerIndex()]
-    if (event.target.src !== targetUrl) {
-      return
+
+    // Find which index this loaded URL belongs to (not necessarily viewerIndex
+    // which may have changed during loading).
+    const loadedUrl = event.target.src
+    const urls = extractedUrls()
+    let loadedIdx = -1
+    for (const [idxStr, url] of Object.entries(urls)) {
+      if (url === loadedUrl) { loadedIdx = parseInt(idxStr, 10); break }
     }
+    if (loadedIdx < 0) return
 
     const list = viewerImages()
-    const img = list[Math.min(Math.max(viewerIndex(), 0), list.length - 1)]
+    const img = list[Math.min(Math.max(loadedIdx, 0), list.length - 1)]
     if (!img || (img.width === naturalWidth && img.height === naturalHeight)) return
 
     const wasZero = !img.width || img.width === 0
@@ -659,97 +693,35 @@ function ViewerPage(props) {
 
 
 
-  // Annotation utility helpers
+  // Memoised annotation data for the currently displayed image.
+  // Replaces three separate helpers that each duplicated the foundKey lookup.
+  const currentAnnotation = createMemo(() => {
+    const img = displayedImage()
+    const currentAnnotations = viewerAnnotations()
+    if (!img) return null
+    const foundKey = findAnnotationKey(img, currentAnnotations.images)
+    return foundKey ? currentAnnotations.images[foundKey] : null
+  })
+
   const getAnnotationViewBox = (img) => {
-    if (!img) return undefined
-    const currentAnnotations = viewerAnnotations()
-    const activeName = img.name.toLowerCase()
-    const simpleActiveName = img.name.split('/').pop().toLowerCase()
-    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "")
-    
-    const foundKey = Object.keys(currentAnnotations.images).find(k => {
-      const kn = k.toLowerCase()
-      if (kn === activeName || kn === simpleActiveName) return true
-      const skn = k.split('/').pop().toLowerCase()
-      if (skn === simpleActiveName) return true
-      const ckn = skn.replace(/\.[^/.]+$/, "")
-      if (ckn === cleanActiveName) return true
-      
-      const ann = currentAnnotations.images[k]
-      if (ann && ann.id !== null) {
-         const idStr = ann.id.toString()
-         if (cleanActiveName === idStr) return true
-         const nameNum = cleanActiveName.match(/\d+$/)?.[0]
-         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true
-      }
-      return false
-    })
-    
-    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null
-    if (annotationData && annotationData.width && annotationData.height) {
-      return `0 0 ${annotationData.width} ${annotationData.height}`
+    const ann = currentAnnotation()
+    if (ann && ann.width && ann.height) {
+      return `0 0 ${ann.width} ${ann.height}`
     }
-    return img.width && img.height ? `0 0 ${img.width} ${img.height}` : undefined
+    return img && img.width && img.height ? `0 0 ${img.width} ${img.height}` : undefined
   }
 
-  const getBoxes = (img) => {
-    if (!img) return { boxes: [], labels: {} }
-    const currentAnnotations = viewerAnnotations()
-    const activeName = img.name.toLowerCase()
-    const simpleActiveName = img.name.split('/').pop().toLowerCase()
-    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "")
-    
-    const foundKey = Object.keys(currentAnnotations.images).find(k => {
-      const kn = k.toLowerCase()
-      if (kn === activeName || kn === simpleActiveName) return true
-      const skn = k.split('/').pop().toLowerCase()
-      if (skn === simpleActiveName) return true
-      const ckn = skn.replace(/\.[^/.]+$/, "")
-      if (ckn === cleanActiveName) return true
-      
-      const ann = currentAnnotations.images[k]
-      if (ann && ann.id !== null) {
-         const idStr = ann.id.toString()
-         if (cleanActiveName === idStr) return true
-         const nameNum = cleanActiveName.match(/\d+$/)?.[0]
-         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true
-      }
-      return false
-    })
-    
-    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null
+  const getBoxes = () => {
+    const ann = currentAnnotation()
     return {
-      boxes: annotationData?.boxes || [],
-      labels: currentAnnotations.labels
+      boxes: ann?.boxes || [],
+      labels: viewerAnnotations().labels
     }
   }
 
-  const getAnnotationIdText = (img) => {
-    if (!img) return 'No ID'
-    const currentAnnotations = viewerAnnotations()
-    const activeName = img.name.toLowerCase()
-    const simpleActiveName = img.name.split('/').pop().toLowerCase()
-    const cleanActiveName = simpleActiveName.replace(/\.[^/.]+$/, "")
-    
-    const foundKey = Object.keys(currentAnnotations.images).find(k => {
-      const kn = k.toLowerCase()
-      if (kn === activeName || kn === simpleActiveName) return true
-      const skn = k.split('/').pop().toLowerCase()
-      if (skn === simpleActiveName) return true
-      const ckn = skn.replace(/\.[^/.]+$/, "")
-      if (ckn === cleanActiveName) return true
-      
-      const ann = currentAnnotations.images[k]
-      if (ann && ann.id !== null) {
-         const idStr = ann.id.toString()
-         if (cleanActiveName === idStr) return true
-         const nameNum = cleanActiveName.match(/\d+$/)?.[0]
-         if (nameNum && parseInt(nameNum) === parseInt(idStr)) return true
-      }
-      return false
-    })
-    const annotationData = foundKey ? currentAnnotations.images[foundKey] : null
-    return annotationData ? `ID: ${annotationData.id}` : 'No ID'
+  const getAnnotationIdText = () => {
+    const ann = currentAnnotation()
+    return ann ? `ID: ${ann.id}` : 'No ID'
   }
 
   return (
@@ -827,7 +799,9 @@ function ViewerPage(props) {
                     alt={displayedImage()?.name}
                     onLoad={(e) => {
                       handleViewerImageLoad(e)
-                      if (activeBuffer() === 2 && image1Url() === extractedUrls()[viewerIndex()]) {
+                      // Swap to buffer 1 if it just loaded the target image
+                      const targetUrl = extractedUrls()[viewerIndex()]
+                      if (activeBuffer() === 2 && image1Url() && image1Url() === targetUrl) {
                         setDisplayedViewerIndex(viewerIndex())
                         setActiveBuffer(1)
                       }
@@ -849,7 +823,9 @@ function ViewerPage(props) {
                     alt={displayedImage()?.name}
                     onLoad={(e) => {
                       handleViewerImageLoad(e)
-                      if (activeBuffer() === 1 && image2Url() === extractedUrls()[viewerIndex()]) {
+                      // Swap to buffer 2 if it just loaded the target image
+                      const targetUrl = extractedUrls()[viewerIndex()]
+                      if (activeBuffer() === 1 && image2Url() && image2Url() === targetUrl) {
                         setDisplayedViewerIndex(viewerIndex())
                         setActiveBuffer(2)
                       }
@@ -886,7 +862,7 @@ function ViewerPage(props) {
                       }}
                     >
                       {(() => {
-                        const data = getBoxes(displayedImage())
+                        const data = getBoxes()
                         return (
                           <For each={data.boxes}>
                             {(box) => {
@@ -1006,7 +982,7 @@ function ViewerPage(props) {
                   <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
                   {viewerIndex() + 1}/{viewerImages().length} 
                   <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
-                  {getAnnotationIdText(displayedImage())}
+                  {getAnnotationIdText()}
                   <span style={{ margin: '0 8px', opacity: 0.3 }}>•</span>
                   {displayedImage()?.width || 0} x {displayedImage()?.height || 0} • Zoom {Math.round(viewerTx().scale * 100)}% • ← → để chuyển
                 </span>

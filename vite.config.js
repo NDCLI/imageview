@@ -32,8 +32,4 @@ export default defineConfig({
   optimizeDeps: {
     include: ['fflate']
   },
-  worker: {
-    format: 'es',
-    plugins: () => [solidPlugin()]
-  }
 })
