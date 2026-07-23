@@ -1,6 +1,7 @@
 import { createSignal, createEffect, onMount, onCleanup, Show, For, startTransition, untrack } from 'solid-js'
 import { unzip } from 'unzipit'
 import { getFolderHandle, setFolderHandle, clearFolderHandle } from './storage'
+import { inject } from '@vercel/analytics'
 
 const PREVIEW_TAB_NAME = 'image-viewer-tab'
 const VIEWER_STATE_KEY = 'local-image-viewer-state'
@@ -1431,6 +1432,12 @@ export default function App() {
         localStorage.setItem('last_build_date', String(currentBuild))
       }
     }
+    
+    // Initialize Vercel Analytics
+    inject({
+      mode: 'auto',
+      framework: 'solidjs'
+    })
   })
 
   const initialRouteState = getViewerRouteState()
