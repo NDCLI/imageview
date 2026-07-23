@@ -1,8 +1,6 @@
-/* Google Fonts loaded non-blocking from index.html via preload + media swap */
-
 :root {
-  --font-sans: 'Inter', 'Aptos Display', 'Segoe UI Variable Display', sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --font-sans: 'Aptos', 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  --font-mono: 'Cascadia Mono', 'SFMono-Regular', Consolas, monospace;
   --accent: #ff8a4c;
   --accent2: #4ea8ff;
   --success: #34d399;
