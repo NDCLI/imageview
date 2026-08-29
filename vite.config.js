@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import solidPlugin from 'vite-plugin-solid'
 
 export default defineConfig({
@@ -21,15 +21,19 @@ export default defineConfig({
     // Optimize chunk size
     rollupOptions: {
       output: {
-        manualChunks: {
-          // Separate vendor chunks for better caching
-          'solid': ['solid-js', 'solid-js/web'],
-          'zip': ['unzipit', 'fflate'],
+        manualChunks(id) {
+          if (id.includes('node_modules/solid-js')) return 'solid'
+          if (id.includes('node_modules/unzipit') || id.includes('node_modules/fflate'))
+            return 'zip'
         },
       },
     },
   },
   optimizeDeps: {
-    include: ['fflate']
+    include: ['fflate'],
+  },
+  test: {
+    environment: 'jsdom',
+    globals: true,
   },
 })

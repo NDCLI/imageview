@@ -1,21 +1,43 @@
 {
   "name": "local-image-compare",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "format": "prettier --check src public package.json vite.config.js eslint.config.js .prettierrc .github/workflows/ci.yml",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.{js,jsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.css": "prettier --write"
   },
   "dependencies": {
-    "fflate": "^0.8.2",
-    "solid-js": "^1.9.14",
+    "fflate": "^0.8.3",
+    "solid-js": "^1.9.15",
     "unzipit": "^2.0.3"
   },
   "devDependencies": {
+    "@solidjs/testing-library": "^0.8.10",
+    "eslint": "^10.9.1",
+    "eslint-plugin-solid": "^0.16.1",
     "gh-pages": "^6.3.0",
-    "vite": "^5.4.10",
-    "vite-plugin-solid": "^2.11.12"
+    "husky": "^9.1.7",
+    "jsdom": "^27.4.0",
+    "lint-staged": "^16.2.7",
+    "prettier": "^3.7.4",
+    "vite": "^8.2.2",
+    "vite-plugin-solid": "^2.11.14",
+    "vitest": "^4.1.11"
   }
 }

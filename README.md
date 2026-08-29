@@ -1,6 +1,6 @@
 # Image Viewer Pro - Universal ZIP Viewer
 
-Ứng dụng Vite + React chuyên dụng để duyệt, so sánh và quản lý dữ liệu ảnh từ tập tin ZIP với hiệu năng cực cao và các tính năng hỗ trợ kiểm tra (audit) chuyên sâu.
+Ứng dụng Vite + SolidJS chuyên dụng để duyệt, so sánh và quản lý dữ liệu ảnh từ tập tin ZIP với hiệu năng cực cao và các tính năng hỗ trợ kiểm tra (audit) chuyên sâu.
 
 ## 🚀 Tính năng nổi bật
 
@@ -27,6 +27,17 @@ npm install
 
 # Chạy ở chế độ development
 npm run dev
+```
+
+Để bật analytics PostHog, sao chép `.env.example` thành `.env` rồi đặt `VITE_POSTHOG_KEY` của dự án. File `.env` không được commit.
+
+## ✅ Kiểm tra chất lượng
+
+```bash
+npm run format
+npm run lint
+npm test
+npm run build
 ```
 
 ## 📂 Miền dữ liệu (Data Domain)
