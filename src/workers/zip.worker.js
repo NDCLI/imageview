@@ -6,6 +6,62 @@ let isWorking = false
 let previewCacheDirectory = null
 const cacheFileNames = new Map()
 
+// Keep a small hot cache in the worker so scrubbing back and forth does not
+// hit OPFS (or decode the same image) for every request.  The limits are
+// deliberately bounded because a worker can stay alive for the whole viewer
+// session and previews are usually requested in bursts.
+const MAX_MEMORY_PREVIEW_ENTRIES = 48
+const MAX_MEMORY_PREVIEW_BYTES = 64 * 1024 * 1024
+const memoryPreviewCache = new Map()
+let memoryPreviewBytes = 0
+
+function clearMemoryPreviewCache() {
+  memoryPreviewCache.clear()
+  memoryPreviewBytes = 0
+}
+
+function getMemoryPreviewKey(name, maxDimension) {
+  return `${maxDimension}:${name}`
+}
+
+function readMemoryPreview(name, maxDimension) {
+  if (!maxDimension) return null
+  const key = getMemoryPreviewKey(name, maxDimension)
+  const entry = memoryPreviewCache.get(key)
+  if (!entry) return null
+
+  // Refresh LRU order without copying the Blob.
+  memoryPreviewCache.delete(key)
+  memoryPreviewCache.set(key, entry)
+  return entry.blob
+}
+
+function rememberPreview(name, maxDimension, blob) {
+  if (!maxDimension || !blob?.size || blob.size > MAX_MEMORY_PREVIEW_BYTES) return false
+
+  const key = getMemoryPreviewKey(name, maxDimension)
+  const existing = memoryPreviewCache.get(key)
+  if (existing) {
+    memoryPreviewBytes -= existing.size
+    memoryPreviewCache.delete(key)
+  }
+
+  while (
+    memoryPreviewCache.size >= MAX_MEMORY_PREVIEW_ENTRIES ||
+    memoryPreviewBytes + blob.size > MAX_MEMORY_PREVIEW_BYTES
+  ) {
+    const oldestKey = memoryPreviewCache.keys().next().value
+    if (oldestKey === undefined) break
+    const oldest = memoryPreviewCache.get(oldestKey)
+    memoryPreviewCache.delete(oldestKey)
+    memoryPreviewBytes -= oldest?.size || 0
+  }
+
+  memoryPreviewCache.set(key, { blob, size: blob.size })
+  memoryPreviewBytes += blob.size
+  return true
+}
+
 async function hashText(value) {
   const data = new TextEncoder().encode(value)
   const digest = await crypto.subtle.digest('SHA-256', data)
@@ -15,6 +71,7 @@ async function hashText(value) {
 async function initializePreviewCache(cacheKey) {
   previewCacheDirectory = null
   cacheFileNames.clear()
+  clearMemoryPreviewCache()
   if (!navigator.storage?.getDirectory || !cacheKey) return
 
   try {
@@ -38,19 +95,24 @@ async function getCacheFileName(name, maxDimension) {
 }
 
 async function readCachedPreview(name, maxDimension) {
+  const memoryHit = readMemoryPreview(name, maxDimension)
+  if (memoryHit) return memoryHit
   if (!previewCacheDirectory || !maxDimension) return null
   try {
     const fileHandle = await previewCacheDirectory.getFileHandle(
       await getCacheFileName(name, maxDimension),
     )
     const file = await fileHandle.getFile()
-    return file.size > 0 ? file : null
+    if (file.size <= 0) return null
+    rememberPreview(name, maxDimension, file)
+    return file
   } catch {
     return null
   }
 }
 
 async function writeCachedPreview(name, maxDimension, blob) {
+  rememberPreview(name, maxDimension, blob)
   if (!previewCacheDirectory || !maxDimension) return false
   try {
     const fileHandle = await previewCacheDirectory.getFileHandle(
@@ -178,7 +240,10 @@ async function handleMessage(data) {
       if (!blob) {
         blob = await createPreviewBlob(await entry.blob(), data.maxDimension)
         const stored = await writeCachedPreview(data.name, data.maxDimension, blob)
-        if (data.type === 'warm' && !stored) {
+        // OPFS is an optional persistence layer. A successful bounded memory
+        // insert is enough to satisfy a warm request when disk storage is not
+        // available or has reached its quota.
+        if (data.type === 'warm' && !stored && !readMemoryPreview(data.name, data.maxDimension)) {
           throw new Error('Không thể lưu preview xuống bộ nhớ đĩa OPFS')
         }
       }

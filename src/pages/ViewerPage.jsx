@@ -25,8 +25,10 @@ import {
 } from '../lib/viewer-state'
 import { openZip } from '../lib/zip-loader'
 
-const PREFETCH_FORWARD_COUNT = 30
-const PREFETCH_BACKWARD_COUNT = 4
+// Keep a compact sliding window so large archives do not allocate dozens of
+// decoded previews before the user needs them.
+const PREFETCH_FORWARD_COUNT = 8
+const PREFETCH_BACKWARD_COUNT = 2
 const PREFETCH_OFFSETS = [
   0,
   ...Array.from({ length: PREFETCH_FORWARD_COUNT }, (_, index) => index + 1),
@@ -49,6 +51,8 @@ export default function ViewerPage(props) {
   const [image1Url, setImage1Url] = createSignal('')
   const [image2Url, setImage2Url] = createSignal('')
   const [activeBuffer, setActiveBuffer] = createSignal(1) // 1 or 2
+  const [channelReady, setChannelReady] = createSignal(false)
+  const [paintRevision, setPaintRevision] = createSignal(0)
   const decodedUrls = new Set()
   const decodePromises = new Map()
   const paintedUrls = new Set()
@@ -77,6 +81,7 @@ export default function ViewerPage(props) {
       .then(() => {
         paintedUrls.add(url)
         activatePaintedBuffer(buffer, url)
+        setPaintRevision((revision) => revision + 1)
       })
       .finally(() => paintPromises.delete(url))
 
@@ -157,6 +162,8 @@ export default function ViewerPage(props) {
   let viewerTouch = null
   let lastFitScale = 1
   let channel = null
+  let disposed = false
+  let previousEntries = null
   const requestedImages = new Set()
 
   const activeImage = () => {
@@ -171,10 +178,27 @@ export default function ViewerPage(props) {
 
     // BroadcastChannel for cross-tab communication (Viewer side)
     channel = new BroadcastChannel('image-view-channel')
+    setChannelReady(true)
     channel.onmessage = async (e) => {
       if (e.data.type === 'RES_IMG') {
+        const idx = e.data.idx
+        const record = viewerImages()[idx]
+        const offset = idx - viewerIndex()
+        if (
+          !record ||
+          (e.data.name && e.data.name !== record.name) ||
+          (!extractAllMode() &&
+            (offset < -PREFETCH_BACKWARD_COUNT || offset > PREFETCH_FORWARD_COUNT))
+        ) {
+          requestedImages.delete(idx)
+          return
+        }
         const url = URL.createObjectURL(e.data.blob)
         await preDecodeUrl(url)
+        if (disposed) {
+          URL.revokeObjectURL(url)
+          return
+        }
         setExtractedUrls((prev) => {
           if (prev[e.data.idx]) {
             decodedUrls.delete(url)
@@ -240,6 +264,7 @@ export default function ViewerPage(props) {
 
   onCleanup(() => {
     // Revoke all created URLs
+    disposed = true
     Object.values(extractedUrls()).forEach((url) => URL.revokeObjectURL(url))
     decodedUrls.clear()
     decodePromises.clear()
@@ -251,23 +276,31 @@ export default function ViewerPage(props) {
   // Sliding window pre-fetching effect
   createEffect(() => {
     const displayImages = viewerImages()
+    // Reading this signal makes the effect run again after onMount creates the
+    // channel. Without it, a viewer opened before the channel was ready could
+    // miss its first image request.
+    const isChannelReady = channelReady()
+    const currentEntries = zipEntries()
+    const isExtractAll = extractAllMode()
     if (displayImages.length === 0) return
 
     const activeIdx = viewerIndex()
     let timer
 
     untrack(() => {
-      const isExtractAll = extractAllMode()
-
+      if (currentEntries !== previousEntries) {
+        requestedImages.clear()
+        previousEntries = currentEntries
+      }
       if (isExtractAll) {
         const fetchImage = (idx, priority = false) => {
           if (extractedUrls()[idx] || (requestedImages.has(idx) && !priority)) return
           const imgRecord = displayImages[idx]
           if (!imgRecord) return
 
-          const entries = zipEntries()
+          const entries = currentEntries
           if (entries) {
-            if (entries.paths.includes(imgRecord.name)) {
+            if (entries.hasPath(imgRecord.name)) {
               requestedImages.add(idx)
               entries
                 .getBlob(imgRecord.name, {
@@ -279,8 +312,9 @@ export default function ViewerPage(props) {
                   preDecodeUrl(url)
                   setExtractedUrls((current) => ({ ...current, [idx]: url }))
                 })
+                .catch(() => requestedImages.delete(idx))
             }
-          } else if (channel) {
+          } else if (channel && isChannelReady) {
             requestedImages.add(idx)
             channel.postMessage({
               type: 'REQ_IMG',
@@ -330,9 +364,9 @@ export default function ViewerPage(props) {
           const imgRecord = displayImages[idx]
           if (!imgRecord) return
 
-          const entries = zipEntries()
+          const entries = currentEntries
           if (entries) {
-            if (entries.paths.includes(imgRecord.name)) {
+            if (entries.hasPath(imgRecord.name)) {
               requestedImages.add(idx)
               entries
                 .getBlob(imgRecord.name, {
@@ -340,22 +374,33 @@ export default function ViewerPage(props) {
                   priority,
                 })
                 .then(async (blob) => {
+                  if (disposed || entries !== zipEntries()) return
                   const url = URL.createObjectURL(blob)
                   await preDecodeUrl(url)
+                  if (disposed) {
+                    URL.revokeObjectURL(url)
+                    return
+                  }
                   setExtractedUrls((current) => {
-                    if (neighborRange.has(idx) && !current[idx]) {
+                    const currentOffset = idx - viewerIndex()
+                    if (
+                      currentOffset >= -PREFETCH_BACKWARD_COUNT &&
+                      currentOffset <= PREFETCH_FORWARD_COUNT &&
+                      !current[idx]
+                    ) {
                       return { ...current, [idx]: url }
                     } else {
                       decodedUrls.delete(url)
                       paintedUrls.delete(url)
                       URL.revokeObjectURL(url)
+                      if (!current[idx]) requestedImages.delete(idx)
                       return current
                     }
                   })
                 })
                 .catch(() => requestedImages.delete(idx))
             }
-          } else if (channel) {
+          } else if (channel && isChannelReady) {
             requestedImages.add(idx)
             channel.postMessage({
               type: 'REQ_IMG',
@@ -461,6 +506,31 @@ export default function ViewerPage(props) {
       setViewerTx(reset)
       lastFitScale = 1
     }
+  }
+
+  // Keep zoom controls centered around the middle of the viewport. This gives
+  // keyboard and touch users the same predictable result as wheel zooming.
+  function zoomViewerBy(factor) {
+    if (!viewerStage) return
+
+    const { scale, panX, panY } = viewerTx()
+    const bounds = viewerStage.getBoundingClientRect()
+    const cx = bounds.width / 2
+    const cy = bounds.height / 2
+    const ix = (cx - panX) / scale
+    const iy = (cy - panY) / scale
+    const nextScale = clamp(scale * factor, MIN_ZOOM, MAX_ZOOM)
+
+    setViewerTx(
+      constrainViewerPan(
+        {
+          scale: nextScale,
+          panX: cx - ix * nextScale,
+          panY: cy - iy * nextScale,
+        },
+        viewerStage,
+      ),
+    )
   }
 
   // Maintain zoom or reset to fit when switching images
@@ -790,6 +860,17 @@ export default function ViewerPage(props) {
     return ann ? `ID: ${ann.id}` : 'No ID'
   }
 
+  const imageLoadState = createMemo(() => {
+    paintRevision()
+    if (!activeImage()) return 'empty'
+
+    const url = extractedUrls()[viewerIndex()]
+    if (!url) return 'loading'
+
+    const activeUrl = activeBuffer() === 1 ? image1Url() : image2Url()
+    return activeUrl === url && paintedUrls.has(url) ? 'ready' : 'loading'
+  })
+
   return (
     <main class="viewer-shell viewer-shell-contained">
       <Show when={showReloadPrompt()}>
@@ -821,11 +902,96 @@ export default function ViewerPage(props) {
         >
           {(img) => (
             <>
+              <div class="viewer-toolbar" aria-label="Thanh công cụ xem ảnh">
+                <div class="viewer-toolbar-leading">
+                  <div class="viewer-nav-controls" aria-label="Điều hướng ảnh">
+                    <button
+                      type="button"
+                      class="viewer-icon-btn"
+                      onClick={goToPreviousImage}
+                      disabled={viewerIndex() <= 0}
+                      aria-label="Ảnh trước"
+                      title="Ảnh trước (←)"
+                    >
+                      <span aria-hidden="true">‹</span>
+                    </button>
+                    <span class="viewer-counter" aria-live="polite">
+                      {viewerIndex() + 1} <span aria-hidden="true">/</span> {viewerImages().length}
+                    </span>
+                    <button
+                      type="button"
+                      class="viewer-icon-btn"
+                      onClick={goToNextImage}
+                      disabled={viewerIndex() >= viewerImages().length - 1}
+                      aria-label="Ảnh tiếp theo"
+                      title="Ảnh tiếp theo (→)"
+                    >
+                      <span aria-hidden="true">›</span>
+                    </button>
+                  </div>
+                  <div class="viewer-title-block">
+                    <span class="viewer-eyebrow">IMAGE VIEWER</span>
+                    <strong title={activeImage()?.name}>
+                      {activeImage()?.name || 'Ảnh hiện tại'}
+                    </strong>
+                  </div>
+                </div>
+
+                <div class="viewer-toolbar-actions">
+                  <span
+                    class={`viewer-load-status viewer-load-status-${imageLoadState()}`}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <span class="viewer-status-dot" aria-hidden="true" />
+                    {imageLoadState() === 'ready' ? 'Sẵn sàng' : 'Đang tải ảnh…'}
+                  </span>
+                  <div class="viewer-zoom-controls" role="group" aria-label="Thu phóng">
+                    <button
+                      type="button"
+                      class="viewer-tool-btn"
+                      onClick={() => zoomViewerBy(0.85)}
+                      aria-label="Thu nhỏ"
+                      title="Thu nhỏ"
+                    >
+                      −
+                    </button>
+                    <button
+                      type="button"
+                      class="viewer-zoom-value"
+                      onClick={resetViewerZoom}
+                      title="Đưa ảnh về vừa khung"
+                      aria-label="Đưa ảnh về vừa khung"
+                    >
+                      {Math.round(viewerTx().scale * 100)}%
+                    </button>
+                    <button
+                      type="button"
+                      class="viewer-tool-btn"
+                      onClick={() => zoomViewerBy(1.15)}
+                      aria-label="Phóng to"
+                      title="Phóng to"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    class="viewer-fit-btn"
+                    onClick={resetViewerZoom}
+                    title="Vừa khung (double click trên ảnh)"
+                  >
+                    Vừa khung
+                  </button>
+                </div>
+              </div>
+
               <div
                 ref={handleStageRef}
                 class="viewer-stage"
                 role="img"
                 tabindex="0"
+                aria-busy={imageLoadState() === 'loading'}
                 aria-label={`Xem ảnh ${displayedImage()?.name || ''}. Dùng mũi tên trái và phải để chuyển ảnh.`}
                 style={{ cursor: viewerTx().scale > 1 ? 'grab' : 'default' }}
                 onMouseDown={handleViewerMouseDown}
@@ -852,7 +1018,11 @@ export default function ViewerPage(props) {
                 >
                   <img
                     src={image1Url()}
-                    alt={displayedImage()?.name}
+                    alt={activeBuffer() === 1 ? displayedImage()?.name || '' : ''}
+                    aria-hidden={activeBuffer() !== 1}
+                    decoding="async"
+                    draggable="false"
+                    fetchpriority={activeBuffer() === 1 ? 'high' : 'low'}
                     onLoad={(e) => {
                       handleViewerImageLoad(e)
                       prePaintBuffer(1, e.currentTarget.src)
@@ -872,7 +1042,11 @@ export default function ViewerPage(props) {
                   />
                   <img
                     src={image2Url()}
-                    alt={displayedImage()?.name}
+                    alt={activeBuffer() === 2 ? displayedImage()?.name || '' : ''}
+                    aria-hidden={activeBuffer() !== 2}
+                    decoding="async"
+                    draggable="false"
+                    fetchpriority={activeBuffer() === 2 ? 'high' : 'low'}
                     onLoad={(e) => {
                       handleViewerImageLoad(e)
                       prePaintBuffer(2, e.currentTarget.src)
@@ -890,21 +1064,6 @@ export default function ViewerPage(props) {
                       display: image2Url() ? 'block' : 'none',
                     }}
                   />
-                  <Show when={!extractedUrls()[viewerIndex()] && !image1Url() && !image2Url()}>
-                    <div
-                      style={{
-                        display: 'flex',
-                        'align-items': 'center',
-                        'justify-content': 'center',
-                        width: '100%',
-                        height: '100%',
-                        'min-height': '300px',
-                      }}
-                    >
-                      <span class="loading-spinner" />
-                    </div>
-                  </Show>
-
                   <Show when={showBoxes()}>
                     <svg
                       class="viewer-annotations"
@@ -959,83 +1118,101 @@ export default function ViewerPage(props) {
                     </svg>
                   </Show>
                 </div>
+                <Show when={imageLoadState() === 'loading'}>
+                  <div class="viewer-loading" role="status" aria-live="polite">
+                    <span class="loading-spinner loading-spinner-small" aria-hidden="true" />
+                    <span>Đang giải nén ảnh…</span>
+                  </div>
+                </Show>
               </div>
 
-              <div class="viewer-meta viewer-meta-content">
-                <input
-                  ref={searchInput}
-                  type="text"
-                  value={searchQuery()}
-                  onInput={(e) => {
-                    const query = e.target.value.trim()
-                    setSearchQuery(query)
-                    if (!query) return
+              <div class="viewer-meta">
+                <div class="viewer-meta-content">
+                  <input
+                    ref={searchInput}
+                    type="text"
+                    value={searchQuery()}
+                    onInput={(e) => {
+                      const query = e.target.value.trim()
+                      setSearchQuery(query)
+                      if (!query) return
 
-                    const displayList = viewerImages()
-                    const currentAnns = viewerAnnotations()
-                    let foundIndex = -1
+                      const displayList = viewerImages()
+                      const currentAnns = viewerAnnotations()
+                      let foundIndex = -1
 
-                    const isNumeric = /^\d+$/.test(query)
-                    if (isNumeric) {
-                      const foundKey = Object.keys(currentAnns.images).find((k) => {
-                        const ann = currentAnns.images[k]
-                        return ann && ann.id !== null && ann.id.toString() === query
-                      })
-
-                      if (foundKey) {
-                        const cleanKey = foundKey.toLowerCase().split('/').pop()
-                        foundIndex = displayList.findIndex((item) => {
-                          const imgName = item.name.toLowerCase()
-                          return imgName === foundKey.toLowerCase() || imgName.endsWith(cleanKey)
+                      const isNumeric = /^\d+$/.test(query)
+                      if (isNumeric) {
+                        const foundKey = Object.keys(currentAnns.images).find((k) => {
+                          const ann = currentAnns.images[k]
+                          return ann && ann.id !== null && ann.id.toString() === query
                         })
+
+                        if (foundKey) {
+                          const cleanKey = foundKey.toLowerCase().split('/').pop()
+                          foundIndex = displayList.findIndex((item) => {
+                            const imgName = item.name.toLowerCase()
+                            return imgName === foundKey.toLowerCase() || imgName.endsWith(cleanKey)
+                          })
+                        }
                       }
-                    }
 
-                    if (foundIndex === -1) {
-                      foundIndex = displayList.findIndex((item) =>
-                        item.name.toLowerCase().includes(query.toLowerCase()),
-                      )
-                    }
+                      if (foundIndex === -1) {
+                        foundIndex = displayList.findIndex((item) =>
+                          item.name.toLowerCase().includes(query.toLowerCase()),
+                        )
+                      }
 
-                    if (foundIndex !== -1 && foundIndex !== viewerIndex()) {
-                      setViewerIndex(foundIndex)
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === 'Escape') {
-                      e.target.blur()
-                    }
-                  }}
-                  onFocus={() => setSearchQuery('')}
-                  onBlur={() => {
-                    const displayList = viewerImages()
-                    if (displayList[viewerIndex()]) {
-                      setSearchQuery(displayList[viewerIndex()].name)
-                    }
-                  }}
-                  class="viewer-search-input"
-                  aria-label="Tìm kiếm ảnh theo tên hoặc ID annotation"
-                  placeholder="Dán hoặc nhập tên ảnh để tìm..."
-                  title="Tìm kiếm tên ảnh"
-                />
-                <button
-                  class={`box-toggle-btn ${showBoxes() ? 'active' : ''}`}
-                  onClick={() => setShowBoxes(!showBoxes())}
-                  title={showBoxes() ? 'Ẩn các box annotation' : 'Hiện các box annotation'}
-                  aria-pressed={showBoxes()}
-                >
-                  {showBoxes() ? 'Hide Boxes' : 'Show Boxes'}
-                </button>
-                <span>
-                  • Job: {viewerAnnotations().jobId || 'N/A'}
-                  <span class="viewer-separator">•</span>
-                  {viewerIndex() + 1}/{viewerImages().length}
-                  <span class="viewer-separator">•</span>
-                  {getAnnotationIdText()}
-                  <span class="viewer-separator">•</span>
-                  {displayedImage()?.width || 0} x {displayedImage()?.height || 0} • Zoom{' '}
-                  {Math.round(viewerTx().scale * 100)}% • ← → để chuyển
-                </span>
+                      if (foundIndex !== -1 && foundIndex !== viewerIndex()) {
+                        setViewerIndex(foundIndex)
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === 'Escape') {
+                        e.target.blur()
+                      }
+                    }}
+                    onFocus={() => setSearchQuery('')}
+                    onBlur={() => {
+                      const displayList = viewerImages()
+                      if (displayList[viewerIndex()]) {
+                        setSearchQuery(displayList[viewerIndex()].name)
+                      }
+                    }}
+                    class="viewer-search-input"
+                    aria-label="Tìm kiếm ảnh theo tên hoặc ID annotation"
+                    placeholder="Dán hoặc nhập tên ảnh để tìm..."
+                    title="Tìm kiếm tên ảnh"
+                  />
+                  <button
+                    class={`box-toggle-btn ${showBoxes() ? 'active' : ''}`}
+                    onClick={() => setShowBoxes(!showBoxes())}
+                    title={showBoxes() ? 'Ẩn các box annotation' : 'Hiện các box annotation'}
+                    aria-pressed={showBoxes()}
+                  >
+                    {showBoxes() ? 'Hide Boxes' : 'Show Boxes'}
+                  </button>
+                </div>
+                <div class="viewer-meta-details" aria-live="polite">
+                  <span>
+                    <b>Job</b>
+                    {viewerAnnotations().jobId || 'N/A'}
+                  </span>
+                  <span>
+                    <b>Annotation</b>
+                    {getAnnotationIdText().replace('ID: ', '')}
+                  </span>
+                  <span>
+                    <b>Kích thước</b>
+                    {displayedImage()?.width || 0} × {displayedImage()?.height || 0}
+                  </span>
+                  <span>
+                    <b>Phím tắt</b>
+                    <kbd>←</kbd>
+                    <kbd>→</kbd>
+                    <kbd>F</kbd>
+                  </span>
+                </div>
               </div>
             </>
           )}

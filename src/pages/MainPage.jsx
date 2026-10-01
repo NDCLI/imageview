@@ -1,6 +1,11 @@
 import { createSignal, createEffect, onCleanup, onMount, Show, startTransition } from 'solid-js'
 import { clearFolderHandle, getFolderHandle, setFolderHandle } from '../storage'
-import { PREVIEW_MAX_DIMENSION, PREVIEW_TAB_NAME, VIEWER_STATE_KEY } from '../lib/constants'
+import {
+  INITIAL_PREVIEW_COUNT,
+  PREVIEW_MAX_DIMENSION,
+  PREVIEW_TAB_NAME,
+  VIEWER_STATE_KEY,
+} from '../lib/constants'
 import { parseAnnotations } from '../lib/annotations'
 import { openZip } from '../lib/zip-loader'
 
@@ -25,12 +30,7 @@ export default function MainPage(props) {
   let dragDepth = 0
 
   const previewsReady = () => {
-    const preparation = previewPreparation()
-    return (
-      Boolean(preparation.error) ||
-      preparation.total === 0 ||
-      preparation.completed >= preparation.total
-    )
+    return !isLoading() && images().length > 0
   }
 
   onMount(() => {
@@ -52,13 +52,13 @@ export default function MainPage(props) {
     if (channel) {
       channel.onmessage = async (e) => {
         if (e.data.type === 'REQ_IMG' && currentZipEntries) {
-          if (currentZipEntries.paths.includes(e.data.name)) {
+          if (currentZipEntries.hasPath(e.data.name)) {
             try {
               const blob = await currentZipEntries.getBlob(e.data.name, {
                 maxDimension: e.data.maxDimension,
                 priority: e.data.priority,
               })
-              channel.postMessage({ type: 'RES_IMG', idx: e.data.idx, blob })
+              channel.postMessage({ type: 'RES_IMG', idx: e.data.idx, name: e.data.name, blob })
             } catch (err) {
               console.error('Lỗi khi đọc blob qua channel:', err)
             }
@@ -107,6 +107,7 @@ export default function MainPage(props) {
     zipEntries()?.terminate()
     setZipEntries(null)
     setIsLoading(true)
+    setLoadDone(false)
     setImages([])
     setAnnotations({ labels: {}, images: {} })
     setPreviewPreparation({ completed: 0, total: 0, error: '' })
@@ -152,17 +153,23 @@ export default function MainPage(props) {
         setImages(nextRecords)
       })
 
-      setPreviewPreparation({ completed: 0, total: nextRecords.length, error: '' })
+      // Prepare only the first few previews before opening the viewer. The
+      // remaining frames are fetched lazily by the viewer as the user moves.
+      const initialPreviewRecords = nextRecords.slice(0, INITIAL_PREVIEW_COUNT)
+      setPreviewPreparation({ completed: 0, total: initialPreviewRecords.length, error: '' })
       navigator.storage?.persist?.().catch(() => {})
       void zip
         .warmBlobs(
-          nextRecords.map((record) => record.name),
+          initialPreviewRecords.map((record) => record.name),
           { maxDimension: PREVIEW_MAX_DIMENSION },
-          (completed, total) =>
-            setPreviewPreparation((current) => ({ ...current, completed, total })),
+          (completed, total) => {
+            if (zipEntries() === zip)
+              setPreviewPreparation((current) => ({ ...current, completed, total }))
+          },
         )
         .catch((error) => {
-          console.warn('Không thể chuẩn bị toàn bộ preview:', error)
+          if (zipEntries() !== zip) return
+          console.warn('Không thể chuẩn bị preview ban đầu:', error)
           setPreviewPreparation((current) => ({
             ...current,
             error: 'Không đủ dung lượng hoặc trình duyệt không cho phép lưu OPFS',

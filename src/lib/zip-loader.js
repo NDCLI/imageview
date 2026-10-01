@@ -30,8 +30,10 @@ export async function openZip(file) {
 
   const cacheKey = `${file.name}:${file.size}:${file.lastModified}:preview-v1`
   const loaded = await request({ type: 'load', file, cacheKey })
+  const pathSet = new Set(loaded.paths)
   return {
     paths: loaded.paths,
+    hasPath: (name) => pathSet.has(name),
     annotationsText: loaded.annotationsText,
     getBlob: async (name, options = {}) => (await request({ type: 'blob', name, ...options })).blob,
     warmBlobs: async (names, options = {}, onProgress) => {

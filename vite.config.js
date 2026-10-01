@@ -2,7 +2,7 @@ import { defineConfig } from 'vitest/config'
 import solidPlugin from 'vite-plugin-solid'
 
 export default defineConfig({
-  plugins: [solidPlugin()],
+  plugins: [solidPlugin({ hot: process.env.NODE_ENV !== 'test' })],
   define: {
     __BUILD_DATE__: Date.now(),
   },

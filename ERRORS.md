@@ -1,5 +1,13 @@
 # ERROR LOGS
 
+## [2026-10-01] - Kiểm thử JSX bị chặn bởi Solid HMR
+
+- **Lỗi**: Vitest trên Windows không nạp được `file:///@solid-refresh` khi import viewer JSX.
+- **Cách sửa**: Tắt Solid HMR khi `NODE_ENV=test` trong `vite.config.js`; giữ HMR cho chế độ phát triển.
+- **Xác minh**: Hai kiểm thử hồi quy của viewer và toàn bộ 8 kiểm thử đã qua.
+- **Kiểm tra định dạng**: Prettier ban đầu báo `src/main.jsx` và `package.json` do xuống dòng; đã chuẩn hóa, không đổi nội dung.
+
+
 Mọi lỗi phát sinh trong quá trình phát triển sẽ được ghi lại tại đây để học hỏi và rút kinh nghiệm.
 
 ## [2026-03-25 21:51] - Lỗi Trắng Màn Hình Khi Deploy GitHub Pages
